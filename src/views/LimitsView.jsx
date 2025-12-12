@@ -4,6 +4,7 @@ import React, {
   useRef,
   useMemo,
   useCallback,
+  useEffect,
 } from "react";
 import {
   CHART_MARGINS,
@@ -15,8 +16,25 @@ import HeaderBar from "../components/layout/HeaderBar";
 import LimitsChart from "../components/chart/LimitsChart";
 import ControlPanel from "../components/panel/ControlPanel";
 
-const FIXED_X_MIN = 0;
-const FIXED_X_MAX = 1620;
+const CHART_TYPES = {
+  tension: { key: "tension", label: "Grafico Tension", xMin: 0, xMax: 810 },
+  temperatura: {
+    key: "temperatura",
+    label: "Grafico Temperatura",
+    xMin: 800,
+    xMax: 1620,
+  },
+};
+
+const DEFAULT_CHART_TYPE = "tension";
+const DEFAULT_RANGE = CHART_TYPES[DEFAULT_CHART_TYPE];
+const CHANNELS = {
+  "1": { id: "1", label: "Canal 1", color: "#7c3aed" }, // morado
+  "2": { id: "2", label: "Canal 2", color: "#22c55e" }, // verde
+  "3": { id: "3", label: "Canal 3", color: "#b45309" }, // marrón
+};
+const DEFAULT_CHANNEL = "1";
+
 const FIXED_Y_MIN = -600;
 const FIXED_Y_MAX = 600;
 
@@ -158,19 +176,26 @@ const decimateVisibleData = (data, maxPoints) => {
 
 const LimitsView = () => {
   // --- Estados principales ---
+  const [chartType, setChartType] = useState(DEFAULT_CHART_TYPE);
+  const [channel, setChannel] = useState(DEFAULT_CHANNEL);
   const [data, setData] = useState([]);
   const [limits, setLimits] = useState([]);
+  const [isReloading, setIsReloading] = useState(false);
+  const [dataError, setDataError] = useState(null);
 
   const [nextId, setNextId] = useState(100);
 
   const [initialStats, setInitialStats] = useState({
-    xMin: FIXED_X_MIN,
-    xMax: FIXED_X_MAX,
+    xMin: DEFAULT_RANGE.xMin,
+    xMax: DEFAULT_RANGE.xMax,
     yMin: FIXED_Y_MIN,
     yMax: FIXED_Y_MAX,
   });
 
-  const [xDomain, setXDomain] = useState([FIXED_X_MIN, FIXED_X_MAX]);
+  const [xDomain, setXDomain] = useState([
+    DEFAULT_RANGE.xMin,
+    DEFAULT_RANGE.xMax,
+  ]);
   const [yDomain, setYDomain] = useState([FIXED_Y_MIN, FIXED_Y_MAX]);
 
   const [mode, setMode] = useState("zoom"); // 'zoom' | 'draw'
@@ -196,6 +221,23 @@ const LimitsView = () => {
   const rafRef = useRef(null);
   const chartRectRef = useRef(null);
   const lastDrawCoordsRef = useRef(null);
+  const isReloadingRef = useRef(false);
+
+  const getRangeForChart = useCallback(
+    (type) => CHART_TYPES[type] || CHART_TYPES.tension,
+    []
+  );
+
+  const applyChartRange = useCallback((range) => {
+    setInitialStats({
+      xMin: range.xMin,
+      xMax: range.xMax,
+      yMin: FIXED_Y_MIN,
+      yMax: FIXED_Y_MAX,
+    });
+    setXDomain([range.xMin, range.xMax]);
+    setYDomain([FIXED_Y_MIN, FIXED_Y_MAX]);
+  }, []);
 
   // --- OPTIMIZACIÓN DE DATOS (WINDOWING) ---
     // --- OPTIMIZACIÓN DE DATOS (WINDOWING) ---
@@ -226,70 +268,73 @@ const LimitsView = () => {
     return decimateVisibleData(visibleData, MAX_CHART_POINTS);
   }, [visibleData]);
 
+  const fetchChartData = useCallback(
+    async (type, channelKey) => {
+      const channelInfo = CHANNELS[channelKey] || CHANNELS[DEFAULT_CHANNEL];
+      const range = getRangeForChart(type);
+      setIsReloading(true);
+      setDataError(null);
 
-  // --- Carga de archivos de datos ---
-  const handleFileUpload = async (event) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
+      try {
+        const param = type === "tension" ? "str" : "tem";
+        const apiBase =
+          import.meta.env.VITE_CH1_API || window.location.origin;
+        const response = await fetch(
+          `${apiBase}/api/ch1-data?type=${param}&min=${range.xMin}&max=${range.xMax}&ch=${channelInfo.id}`
+        );
+        const rawText = await response.text();
 
-    const readFile = (file) => {
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const text = e.target.result;
-          const lines = text.trim().split("\n");
-          const parsed = [];
-          for (let i = 0; i < lines.length; i++) {
-            const parts = lines[i].trim().split(",");
-            if (parts.length >= 2) {
-              const xVal = parseFloat(parts[0]);
-              const yVal = parseFloat(parts[1]);
-              if (!isNaN(xVal) && !isNaN(yVal)) {
-                parsed.push({ distance: xVal, temperature: yVal });
-              }
-            }
-          }
-          parsed.sort((a, b) => a.distance - b.distance);
-          resolve(parsed);
-        };
-        reader.readAsText(file);
-      });
-    };
-
-    try {
-      const allFilesData = await Promise.all(files.map(readFile));
-      let combinedData = [];
-      allFilesData.forEach((fileData, index) => {
-        if (fileData.length > 0) {
-          combinedData = combinedData.concat(fileData);
-          if (index < allFilesData.length - 1) {
-            const lastPoint = fileData[fileData.length - 1];
-            combinedData.push({
-              distance: lastPoint.distance,
-              temperature: null,
-            });
-          }
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${rawText || ""}`.trim());
         }
-      });
 
-      if (combinedData.length > 0) {
-        setInitialStats({
-          xMin: FIXED_X_MIN,
-          xMax: FIXED_X_MAX,
-          yMin: FIXED_Y_MIN,
-          yMax: FIXED_Y_MAX,
-        });
-        setXDomain([FIXED_X_MIN, FIXED_X_MAX]);
-        setYDomain([FIXED_Y_MIN, FIXED_Y_MAX]);
-        setData(combinedData);
+        let payload;
+        try {
+          payload = JSON.parse(rawText);
+        } catch {
+          throw new Error(
+            `Respuesta no es JSON. Snippet: ${rawText.slice(0, 180)}`
+          );
+        }
+
+        const points = Array.isArray(payload.points) ? payload.points : [];
+
+        applyChartRange(range);
+        setData(points);
+      } catch (error) {
+        console.error("Error cargando datos", error);
+        setData([]);
+        setDataError(
+          `No se pudieron cargar los datos. Usa Recargar. Detalle: ${error?.message || "desconocido"}`
+        );
+      } finally {
+        setIsReloading(false);
       }
-    } catch (error) {
-      console.error("Error:", error);
-      alert("Error al procesar archivos.");
-    }
+    },
+    [applyChartRange, getRangeForChart]
+  );
 
-    event.target.value = "";
+  useEffect(() => {
+    void fetchChartData(chartType, channel);
+  }, [chartType, channel, fetchChartData]);
+
+  const handleReloadData = () => {
+    void fetchChartData(chartType, channel);
   };
+
+  // Auto-recarga cada 4 minutos para buscar nuevos TXT del canal actual
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!isReloadingRef.current) {
+        void fetchChartData(chartType, channel);
+      }
+    }, 4 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [chartType, channel, fetchChartData]);
+
+  useEffect(() => {
+    isReloadingRef.current = isReloading;
+  }, [isReloading]);
 
   // --- Carga de archivos de límites ---
   const handleLimitsUpload = (event) => {
@@ -504,6 +549,14 @@ const LimitsView = () => {
     setYDomain([initialStats.yMin, initialStats.yMax]);
   };
 
+  const handleChartTypeChange = (type) => {
+    setChartType(type);
+  };
+  const handleChannelChange = (event) => {
+    const value = event.target.value;
+    setChannel(value);
+  };
+
   // --- Límites ---
   const handleSaveOrUpdateLimit = () => {
     if (editingId) {
@@ -600,7 +653,7 @@ const LimitsView = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
+    <div className="flex flex-col min-h-screen bg-slate-50 text-slate-800 font-sans overflow-y-auto">
       <HeaderBar
         xDomain={xDomain}
         yDomain={yDomain}
@@ -609,17 +662,69 @@ const LimitsView = () => {
         onModeChange={setMode}
         hasData={data.length > 0}
         onResetZoom={resetZoom}
-        onDataFilesChange={handleFileUpload}
         onLimitsFileChange={handleLimitsUpload}
         canLoadLimits={data.length > 0}
+        onReloadData={handleReloadData}
+        isReloading={isReloading}
       />
 
-      <div className="flex flex-col flex-1 overflow-hidden">
-        {/* Gráfico */}
+      <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-3 flex-none flex-wrap">
+        <span className="text-sm text-slate-600">Selecciona grafico:</span>
+        <div className="flex gap-2">
+          <button
+            onClick={() => handleChartTypeChange("tension")}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              chartType === "tension"
+                ? "bg-blue-600 text-white shadow"
+                : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+            }`}
+          >
+            Grafico Tension
+          </button>
+          <button
+            onClick={() => handleChartTypeChange("temperatura")}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              chartType === "temperatura"
+                ? "bg-blue-600 text-white shadow"
+                : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+            }`}
+          >
+            Grafico Temperatura
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-600">Canal:</span>
+          <select
+            value={channel}
+            onChange={handleChannelChange}
+            className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
+          >
+            {Object.values(CHANNELS).map((ch) => (
+              <option key={ch.id} value={ch.id}>
+                {ch.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {dataError ? (
+          <span className="ml-auto text-sm text-red-600">{dataError}</span>
+        ) : (
+          <span className="ml-auto text-xs text-slate-500">
+            {isReloading
+              ? "Cargando datos..."
+              : `Datos cargados desde carpeta ${CHANNELS[channel]?.label || "Canal 1"}`}
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-col flex-1 overflow-y-auto min-h-0">
+        {/* Grafico */}
         <div className="flex-1 p-4 relative min-h-0 bg-slate-100">
           <LimitsChart
             data={data}
             visibleData={chartData}
+            lineColor={CHANNELS[channel]?.color || CHANNELS[DEFAULT_CHANNEL].color}
+            chartType={chartType}
             mode={mode}
             drawingState={drawingState}
             xDomain={xDomain}

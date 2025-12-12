@@ -6,7 +6,7 @@ import LanguageDetector from "i18next-browser-languagedetector";
 const resources = {
   es: {
     translation: {
-      "header.title": "Sistema de Monitoreo",
+      "header.title": "Sistema de Monitoreo - BEEMETRY",
       "header.resetView": "Resetear Vista",
       "header.zoom": "Zoom",
       "header.createLimit": "Crear Límite",

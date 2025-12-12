@@ -21,6 +21,8 @@ import {
 const LimitsChart = ({
   data,
   visibleData,
+  lineColor = "#3b82f6",
+  chartType,
   mode,
   drawingState,
   xDomain,
@@ -34,6 +36,8 @@ const LimitsChart = ({
   editingId,
 }) => {
   const hasData = data.length > 0;
+  const yLabel =
+    chartType === "temperatura" ? "Temperatura C°" : "Tension (uE)";
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 h-full p-4 relative select-none flex flex-col">
@@ -62,7 +66,7 @@ const LimitsChart = ({
 
           <div
             ref={chartContainerRef}
-            className={`w-full h-full pt-6 ${
+            className={`w-full h-[520px] md:h-[600px] pt-6 ${
               mode === "draw" ? "cursor-crosshair" : "cursor-zoom-in"
             }`}
             onMouseDown={onMouseDown}
@@ -90,7 +94,7 @@ const LimitsChart = ({
                   allowDataOverflow={true}
                   width={Y_AXIS_WIDTH}
                   label={{
-                    value: "Valor (uE)",
+                    value: yLabel,
                     angle: -90,
                     position: "insideLeft",
                   }}
@@ -107,9 +111,10 @@ const LimitsChart = ({
                 />
 
                 <Line
-                  type="monotone"
+                  // datasets reinician X en cada archivo; usar "linear" evita el requerimiento de monotonicidad
+                  type="linear"
                   dataKey="temperature"
-                  stroke="#3b82f6"
+                  stroke={lineColor}
                   strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 6 }}

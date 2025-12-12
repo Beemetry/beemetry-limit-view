@@ -28,8 +28,8 @@ const ControlPanel = ({
     currentLimitForm.start === 0 && currentLimitForm.end === 0;
 
   return (
-    <div className="h-72 bg-white border-t border-slate-300 shadow-xl z-20 overflow-hidden flex flex-col">
-      <div className="flex-1 p-4 grid grid-cols-12 gap-6 overflow-hidden">
+    <div className="bg-white border-t border-slate-300 shadow-xl z-20 overflow-y-auto flex flex-col max-h-[420px]">
+      <div className="flex-1 p-4 grid grid-cols-12 gap-6 min-h-0">
         {/* Columna 1: Config + Info */}
         <div className="col-span-2 flex flex-col gap-4">
           <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">

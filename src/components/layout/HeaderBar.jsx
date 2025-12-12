@@ -1,13 +1,11 @@
-// src/components/layout/HeaderBar.jsx
 import React, { useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  AlertTriangle,
   ZoomIn,
   MousePointer2,
   Maximize2,
-  Upload,
   FileText,
+  RefreshCw,
 } from "lucide-react";
 
 const HeaderBar = ({
@@ -18,18 +16,15 @@ const HeaderBar = ({
   onModeChange,
   hasData,
   onResetZoom,
-  onDataFilesChange,
   onLimitsFileChange,
   canLoadLimits,
+  onReloadData,
+  isReloading,
 }) => {
   const { t, i18n } = useTranslation();
-
-  const fileInputRef = useRef(null);
   const limitsInputRef = useRef(null);
-  
-  // 🔧 idioma actual seguro (evita undefined.startsWith)
-  const currentLang =
-    i18n.resolvedLanguage || i18n.language || "es";
+
+  const currentLang = i18n.resolvedLanguage || i18n.language || "es";
   const isEs = currentLang.startsWith("es");
 
   const showReset =
@@ -42,27 +37,27 @@ const HeaderBar = ({
     i18n.changeLanguage(isEs ? "en" : "es");
   };
 
-
   return (
     <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm z-10 flex-none h-16">
       <div className="flex items-center gap-3">
-        <div className="bg-blue-600 p-2 rounded-lg">
-          <AlertTriangle className="text-white w-6 h-6" />
-        </div>
+        <img
+          src="/logo_vsg.svg"
+          alt="Logo Beemetry"
+          className="w-10 h-10 object-contain"
+          loading="lazy"
+        />
         <h1 className="text-xl font-bold text-slate-800">
           {t("header.title")}
         </h1>
       </div>
 
       <div className="flex items-center gap-4">
-        {/* Botón cambio idioma */}
         <button
           onClick={toggleLanguage}
           className="px-2 py-1 text-xs border border-slate-200 rounded-md hover:bg-slate-50"
         >
           {isEs ? "ES" : "EN"}
         </button>
-
 
         {showReset && (
           <button
@@ -98,15 +93,6 @@ const HeaderBar = ({
           </button>
         </div>
 
-        {/* Inputs ocultos */}
-        <input
-          type="file"
-          accept=".txt,.csv"
-          ref={fileInputRef}
-          className="hidden"
-          multiple
-          onChange={onDataFilesChange}
-        />
         <input
           type="file"
           accept=".txt,.xml"
@@ -117,10 +103,15 @@ const HeaderBar = ({
 
         <div className="flex gap-2">
           <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-2 bg-slate-800 text-white px-3 py-2 rounded-lg hover:bg-slate-700 transition-colors shadow-sm text-sm"
+            onClick={onReloadData}
+            className="flex items-center gap-2 bg-slate-800 text-white px-3 py-2 rounded-lg hover:bg-slate-700 transition-colors shadow-sm text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+            disabled={isReloading}
           >
-            <Upload size={16} /> {t("header.uploadData")}
+            <RefreshCw
+              size={16}
+              className={isReloading ? "animate-spin" : ""}
+            />
+            {isReloading ? "Recargando..." : "Recargar datos"}
           </button>
           <button
             onClick={() => limitsInputRef.current?.click()}
