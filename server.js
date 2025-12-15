@@ -77,7 +77,8 @@ const handleRequest = async (req, res) => {
     const suffix = typeParam === "str" ? "#str.txt" : "#tem.txt";
     const selected = files
       .filter((name) => name.endsWith(suffix))
-      .sort();
+      .sort()
+      .slice(-15); // procesa solo los últimos 15 archivos para evitar sobrecarga
 
     let combined = [];
     for (let i = 0; i < selected.length; i++) {
