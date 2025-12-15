@@ -191,6 +191,8 @@ const LimitsView = () => {
   const [chartType, setChartType] = useState(DEFAULT_CHART_TYPE);
   const [channel, setChannel] = useState(DEFAULT_CHANNEL);
   const [data, setData] = useState([]);
+  const [latestFileId, setLatestFileId] = useState(null);
+  const [fileVisibility, setFileVisibility] = useState({});
   const [limits, setLimits] = useState([]);
   const [isReloading, setIsReloading] = useState(false);
   const [dataError, setDataError] = useState(null);
@@ -314,6 +316,14 @@ const LimitsView = () => {
     return decimateVisibleData(visibleData, MAX_CHART_POINTS);
   }, [visibleData]);
 
+  const fileIds = useMemo(() => {
+    const ids = new Set();
+    data.forEach((d) => {
+      if (d.fileId) ids.add(d.fileId);
+    });
+    return Array.from(ids);
+  }, [data]);
+
   const fetchChartData = useCallback(
     async (type, channelKey) => {
       const channelInfo = CHANNELS[channelKey] || CHANNELS[DEFAULT_CHANNEL];
@@ -344,12 +354,28 @@ const LimitsView = () => {
         }
 
         const points = Array.isArray(payload.points) ? payload.points : [];
+        const latest = payload.latestFile || null;
 
         applyChartRange(range);
         setData(points);
+        setLatestFileId(latest);
+
+        const newIds = new Set();
+        points.forEach((p) => {
+          if (p.fileId) newIds.add(p.fileId);
+        });
+        setFileVisibility((prev) => {
+          const next = {};
+          Array.from(newIds).forEach((id) => {
+            next[id] = prev[id] !== undefined ? prev[id] : true;
+          });
+          return next;
+        });
       } catch (error) {
         console.error("Error cargando datos", error);
         setData([]);
+        setLatestFileId(null);
+        setFileVisibility({});
         setDataError(
           `No se pudieron cargar los datos. Usa Recargar. Detalle: ${error?.message || "desconocido"}`
         );
@@ -381,6 +407,13 @@ const LimitsView = () => {
   useEffect(() => {
     isReloadingRef.current = isReloading;
   }, [isReloading]);
+
+  const toggleFileVisibility = (fileId) => {
+    setFileVisibility((prev) => ({
+      ...prev,
+      [fileId]: prev[fileId] === false ? true : false,
+    }));
+  };
 
   // --- Carga de archivos de límites ---
   const handleLimitsUpload = (event) => {
@@ -765,12 +798,36 @@ const LimitsView = () => {
 
       <div className="flex flex-col flex-1 overflow-y-auto min-h-0">
         {/* Grafico */}
-        <div className="flex-1 p-4 relative min-h-0 bg-slate-100">
+        <div className="flex-1 p-4 relative min-h-0 bg-slate-100 space-y-3">
+          {fileIds.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {fileIds.map((fid, idx) => {
+                const isOn = fileVisibility[fid] !== false;
+                return (
+                  <button
+                    key={fid}
+                    onClick={() => toggleFileVisibility(fid)}
+                    className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                      isOn
+                        ? "bg-blue-50 border-blue-200 text-blue-700"
+                        : "bg-slate-100 border-slate-200 text-slate-400"
+                    }`}
+                    title={fid}
+                  >
+                    Archivo {idx + 1}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <LimitsChart
             data={data}
             visibleData={chartData}
             lineColor={CHANNELS[channel]?.color || CHANNELS[DEFAULT_CHANNEL].color}
             chartType={chartType}
+            latestFileId={latestFileId}
+            fileIds={fileIds}
+            fileVisibility={fileVisibility}
             mode={mode}
             drawingState={drawingState}
             xDomain={xDomain}

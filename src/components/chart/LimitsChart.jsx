@@ -23,6 +23,9 @@ const LimitsChart = ({
   visibleData,
   lineColor = "#3b82f6",
   chartType,
+  latestFileId,
+  fileIds = [],
+  fileVisibility = {},
   mode,
   drawingState,
   xDomain,
@@ -38,6 +41,51 @@ const LimitsChart = ({
   const hasData = data.length > 0;
   const yLabel =
     chartType === "temperatura" ? "Temperatura C°" : "Tension (uE)";
+  const groupedByFile = React.useMemo(() => {
+    const map = {};
+    (visibleData || []).forEach((d) => {
+      const fid = d.fileId || "default";
+      if (!map[fid]) map[fid] = [];
+      map[fid].push(d);
+    });
+    return map;
+  }, [visibleData]);
+  const visibleOrder = React.useMemo(
+    () => fileIds.filter((id) => fileVisibility[id] !== false),
+    [fileIds, fileVisibility]
+  );
+  const activeTooltipFileId =
+    (latestFileId && visibleOrder.includes(latestFileId) && latestFileId) ||
+    (visibleOrder.length > 0 ? visibleOrder[visibleOrder.length - 1] : null);
+
+  const renderTooltip = React.useCallback(
+    ({ active, payload, label }) => {
+      if (!active || !payload || payload.length === 0) return null;
+      const preferred = payload.find(
+        (item) => item.payload?.fileId === activeTooltipFileId
+      );
+      const selected = preferred || payload[0];
+      if (!selected) return null;
+      const point = selected.payload || {};
+      return (
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-md text-xs space-y-1">
+          <div className="font-semibold text-slate-700">
+            Archivo: {point.fileId || "N/A"}
+          </div>
+          <div className="text-slate-600">X: {label}</div>
+          <div className="text-slate-800">Valor: {selected.value}</div>
+        </div>
+      );
+    },
+    [activeTooltipFileId]
+  );
+
+  const latestSeries =
+    latestFileId && visibleData.length > 0
+      ? visibleData.map((d) =>
+          d.fileId === latestFileId ? d : { ...d, temperature: null }
+        )
+      : null;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 h-full p-4 relative select-none flex flex-col">
@@ -99,28 +147,29 @@ const LimitsChart = ({
                     position: "insideLeft",
                   }}
                 />
-                <RTooltip
-                  contentStyle={{
-                    borderRadius: "8px",
-                    border: "none",
-                    boxShadow:
-                      "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
-                  }}
-                  formatter={(value) => [value, "Valor"]}
-                  labelFormatter={(label) => `X: ${label}`}
-                />
+                <RTooltip content={renderTooltip} />
 
-                <Line
-                  // datasets reinician X en cada archivo; usar "linear" evita el requerimiento de monotonicidad
-                  type="linear"
-                  dataKey="temperature"
-                  stroke={lineColor}
-                  strokeWidth={2}
-                  dot={false}
-                  activeDot={{ r: 6 }}
-                  isAnimationActive={false}
-                  connectNulls={false}
-                />
+                {Object.entries(groupedByFile).map(([fid, series]) => {
+                  const isLatest = latestFileId && fid === latestFileId;
+                  const isVisible = fileVisibility[fid] !== false;
+                  const stroke = isLatest ? "#ef4444" : lineColor;
+                  const strokeOpacity = isVisible ? 1 : 0.25;
+                  return (
+                    <Line
+                      key={fid}
+                      type="linear"
+                      data={series}
+                      dataKey="temperature"
+                      stroke={stroke}
+                      strokeWidth={isLatest ? 2.5 : 2}
+                      strokeOpacity={strokeOpacity}
+                      dot={false}
+                      activeDot={isLatest ? { r: 6 } : false}
+                      isAnimationActive={false}
+                      connectNulls={false}
+                    />
+                  );
+                })}
 
                 {limits.map((limit) => (
                   <ReferenceLine

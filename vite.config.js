@@ -14,6 +14,8 @@ const CHANNEL_DIRS = {
   "2": "Fibra_Espesador_ch2",
   "3": "Fibra_Espesador_ch3",
 };
+// cantidad de archivos recientes a leer por canal (ajusta aquí si quieres más)
+const FILES_PER_CHANNEL = 12;
 const ROOT_DIR = path.resolve(__dirname);
 const CWD_DIR = path.resolve(process.cwd());
 
@@ -80,9 +82,22 @@ const buildDataMiddleware = () => {
       console.log("[ch] request", url.pathname, url.search, "->", channelDir);
       const files = await fs.promises.readdir(dataDir);
       const suffix = typeParam === "str" ? "#str.txt" : "#tem.txt";
-      const selected = files
-        .filter((name) => name.endsWith(suffix))
-        .sort();
+      const filesWithTime = await Promise.all(
+        files
+          .filter((name) => name.endsWith(suffix))
+          .map(async (name) => {
+            const stat = await fs.promises.stat(path.join(dataDir, name));
+            return { name, mtimeMs: stat.mtimeMs };
+          })
+      );
+
+      const selected = filesWithTime
+        .sort((a, b) => b.mtimeMs - a.mtimeMs) // más recientes primero
+        .slice(0, FILES_PER_CHANNEL)
+        .sort((a, b) => a.mtimeMs - b.mtimeMs) // luego cronológico
+        .map((item) => item.name);
+      const latestFileName =
+        selected.length > 0 ? selected[selected.length - 1] : null;
 
       let combined = [];
 
@@ -91,11 +106,13 @@ const buildDataMiddleware = () => {
         const fullPath = path.join(dataDir, filename);
         const filePoints = await parseFilePoints(fullPath, range);
         if (filePoints.length > 0) {
-          combined = combined.concat(filePoints);
+          const tagged = filePoints.map((p) => ({ ...p, fileId: filename }));
+          combined = combined.concat(tagged);
           if (i < selected.length - 1) {
             combined.push({
               distance: filePoints[filePoints.length - 1].distance,
               temperature: null,
+              fileId: filename,
             });
           }
         }
@@ -103,7 +120,7 @@ const buildDataMiddleware = () => {
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ points: combined }));
+      res.end(JSON.stringify({ points: combined, latestFile: latestFileName }));
     } catch (error) {
       console.error("Middleware error", error);
       res.statusCode = 500;

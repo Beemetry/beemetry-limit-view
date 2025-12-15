@@ -12,6 +12,8 @@ const CHANNEL_DIRS = {
   "2": "Fibra_Espesador_ch2",
   "3": "Fibra_Espesador_ch3",
 };
+// cantidad de archivos recientes a leer por canal (modificar aqui si quieres mas)
+const FILES_PER_CHANNEL = 12;
 const PORT = process.env.CH1_API_PORT || 4174;
 
 const parseFilePoints = async (filePath, range) => {
@@ -75,10 +77,23 @@ const handleRequest = async (req, res) => {
     const dataDir = path.join(DATA_ROOT, channelDir);
     const files = await fs.readdir(dataDir);
     const suffix = typeParam === "str" ? "#str.txt" : "#tem.txt";
-    const selected = files
-      .filter((name) => name.endsWith(suffix))
-      .sort()
-      .slice(-15); // procesa solo los últimos 15 archivos para evitar sobrecarga
+
+    const filesWithTime = await Promise.all(
+      files
+        .filter((name) => name.endsWith(suffix))
+        .map(async (name) => {
+          const stat = await fs.stat(path.join(dataDir, name));
+          return { name, mtimeMs: stat.mtimeMs };
+        })
+    );
+
+    const selected = filesWithTime
+      .sort((a, b) => b.mtimeMs - a.mtimeMs) // more recent first
+      .slice(0, FILES_PER_CHANNEL) // limita a los más recientes
+      .sort((a, b) => a.mtimeMs - b.mtimeMs) // process chronologically
+      .map((item) => item.name);
+    const latestFileName =
+      selected.length > 0 ? selected[selected.length - 1] : null;
 
     let combined = [];
     for (let i = 0; i < selected.length; i++) {
@@ -86,11 +101,13 @@ const handleRequest = async (req, res) => {
       const fullPath = path.join(dataDir, filename);
       const filePoints = await parseFilePoints(fullPath, range);
       if (filePoints.length > 0) {
-        combined = combined.concat(filePoints);
+        const tagged = filePoints.map((p) => ({ ...p, fileId: filename }));
+        combined = combined.concat(tagged);
         if (i < selected.length - 1) {
           combined.push({
             distance: filePoints[filePoints.length - 1].distance,
             temperature: null,
+            fileId: filename,
           });
         }
       }
@@ -99,7 +116,7 @@ const handleRequest = async (req, res) => {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.end(JSON.stringify({ points: combined }));
+    res.end(JSON.stringify({ points: combined, latestFile: latestFileName }));
   } catch (error) {
     console.error("API error", error);
     res.statusCode = 500;
@@ -115,3 +132,4 @@ http
     console.log(`ch1 API running at http://localhost:${PORT}/api/ch1-data`);
     console.log(`Reading from: ${DATA_ROOT}`);
   });
+
