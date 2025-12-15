@@ -17,12 +17,21 @@ import LimitsChart from "../components/chart/LimitsChart";
 import ControlPanel from "../components/panel/ControlPanel";
 
 const CHART_TYPES = {
-  tension: { key: "tension", label: "Grafico Tension", xMin: 0, xMax: 810 },
+  tension: {
+    key: "tension",
+    label: "Grafico Tension",
+    xMin: 0,
+    xMax: 810,
+    yMin: -1000,
+    yMax: 1000,
+  },
   temperatura: {
     key: "temperatura",
     label: "Grafico Temperatura",
     xMin: 800,
     xMax: 1620,
+    yMin: -600,
+    yMax: 600,
   },
 };
 
@@ -35,8 +44,11 @@ const CHANNELS = {
 };
 const DEFAULT_CHANNEL = "1";
 
-const FIXED_Y_MIN = -600;
-const FIXED_Y_MAX = 600;
+const LIMIT_CHANNEL_RANGES = {
+  "1": [100, 199],
+  "2": [200, 299],
+  "3": [300, 399],
+};
 
 // === Helpers de decimación (LTTB) para performance ===
 
@@ -188,15 +200,18 @@ const LimitsView = () => {
   const [initialStats, setInitialStats] = useState({
     xMin: DEFAULT_RANGE.xMin,
     xMax: DEFAULT_RANGE.xMax,
-    yMin: FIXED_Y_MIN,
-    yMax: FIXED_Y_MAX,
+    yMin: DEFAULT_RANGE.yMin,
+    yMax: DEFAULT_RANGE.yMax,
   });
 
   const [xDomain, setXDomain] = useState([
     DEFAULT_RANGE.xMin,
     DEFAULT_RANGE.xMax,
   ]);
-  const [yDomain, setYDomain] = useState([FIXED_Y_MIN, FIXED_Y_MAX]);
+  const [yDomain, setYDomain] = useState([
+    DEFAULT_RANGE.yMin,
+    DEFAULT_RANGE.yMax,
+  ]);
 
   const [mode, setMode] = useState("zoom"); // 'zoom' | 'draw'
   const [editingId, setEditingId] = useState(null);
@@ -223,20 +238,51 @@ const LimitsView = () => {
   const lastDrawCoordsRef = useRef(null);
   const isReloadingRef = useRef(false);
 
+  const filteredLimits = useMemo(() => {
+    const range = LIMIT_CHANNEL_RANGES[channel];
+    const scopedLimits =
+      range && range.length === 2
+        ? limits.filter((limit) => {
+            const customId = Number(limit.customId);
+            return (
+              !Number.isNaN(customId) &&
+              customId >= range[0] &&
+              customId <= range[1]
+            );
+          })
+        : limits;
+
+    return scopedLimits
+      .slice()
+      .sort((a, b) => {
+        const aCustom = Number(a.customId);
+        const bCustom = Number(b.customId);
+
+        if (!Number.isNaN(aCustom) && !Number.isNaN(bCustom) && aCustom !== bCustom) {
+          return bCustom - aCustom;
+        }
+
+        return Number(b.id) - Number(a.id);
+      });
+  }, [channel, limits]);
+
   const getRangeForChart = useCallback(
     (type) => CHART_TYPES[type] || CHART_TYPES.tension,
     []
   );
 
   const applyChartRange = useCallback((range) => {
+    const yMin = range.yMin ?? DEFAULT_RANGE.yMin;
+    const yMax = range.yMax ?? DEFAULT_RANGE.yMax;
+
     setInitialStats({
       xMin: range.xMin,
       xMax: range.xMax,
-      yMin: FIXED_Y_MIN,
-      yMax: FIXED_Y_MAX,
+      yMin,
+      yMax,
     });
     setXDomain([range.xMin, range.xMax]);
-    setYDomain([FIXED_Y_MIN, FIXED_Y_MAX]);
+    setYDomain([yMin, yMax]);
   }, []);
 
   // --- OPTIMIZACIÓN DE DATOS (WINDOWING) ---
@@ -734,7 +780,7 @@ const LimitsView = () => {
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
-            limits={limits}
+            limits={filteredLimits}
             editingId={editingId}
           />
         </div>
@@ -750,7 +796,7 @@ const LimitsView = () => {
           editingId={editingId}
           onCancelEdit={handleCancelEdit}
           onSaveOrUpdateLimit={handleSaveOrUpdateLimit}
-          limits={limits}
+          limits={filteredLimits}
           onEditLimit={handleEditLimit}
           onDeleteLimit={handleDeleteLimit}
           onExportLimits={handleExportLimits}
