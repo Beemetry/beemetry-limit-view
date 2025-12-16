@@ -309,7 +309,7 @@ const LimitsView = () => {
     );
   }, [data, xDomain]);
 
-  const MAX_CHART_POINTS = 8000; // ajustable
+  const MAX_CHART_POINTS = 4000; // ajustable
 
   const chartData = useMemo(() => {
     if (!visibleData || visibleData.length === 0) return [];
@@ -553,8 +553,8 @@ const LimitsView = () => {
         const dy = last ? Math.abs(coords.y - last.y) : Infinity;
 
         // 👇 Umbrales mínimos de movimiento para disparar re-render
-        const MIN_DX = 0.5; // metros
-        const MIN_DY = 0.5; // unidades de valor
+        const MIN_DX = 1.0; // metros
+        const MIN_DY = 1.0; // unidades de valor
 
         if (dx >= MIN_DX || dy >= MIN_DY) {
           lastDrawCoordsRef.current = coords;

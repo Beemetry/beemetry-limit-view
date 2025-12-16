@@ -55,8 +55,15 @@ const LimitsChart = ({
     [fileIds, fileVisibility]
   );
   const activeTooltipFileId =
-    (latestFileId && visibleOrder.includes(latestFileId) && latestFileId) ||
-    (visibleOrder.length > 0 ? visibleOrder[visibleOrder.length - 1] : null);
+    visibleOrder.length > 0
+      ? visibleOrder[visibleOrder.length - 1] // último visible (más reciente dentro de los seleccionados)
+      : latestFileId || null;
+
+  // Determina índice de archivo (1-based) según orden de fileIds
+  const activeIndexLabel = React.useMemo(() => {
+    const idx = fileIds.findIndex((id) => id === activeTooltipFileId);
+    return idx >= 0 ? idx + 1 : null;
+  }, [activeTooltipFileId, fileIds]);
 
   const renderTooltip = React.useCallback(
     ({ active, payload, label }) => {
@@ -70,14 +77,14 @@ const LimitsChart = ({
       return (
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-md text-xs space-y-1">
           <div className="font-semibold text-slate-700">
-            Archivo: {point.fileId || "N/A"}
+            Archivo #{activeIndexLabel ?? "N/A"}
           </div>
           <div className="text-slate-600">X: {label}</div>
           <div className="text-slate-800">Valor: {selected.value}</div>
         </div>
       );
     },
-    [activeTooltipFileId]
+    [activeTooltipFileId, activeIndexLabel]
   );
 
   const latestSeries =
@@ -154,6 +161,8 @@ const LimitsChart = ({
                   const isVisible = fileVisibility[fid] !== false;
                   const stroke = isLatest ? "#ef4444" : lineColor;
                   const strokeOpacity = isVisible ? 1 : 0.25;
+                  const showActiveDot =
+                    activeTooltipFileId === fid || activeTooltipFileId == null;
                   return (
                     <Line
                       key={fid}
@@ -164,7 +173,16 @@ const LimitsChart = ({
                       strokeWidth={isLatest ? 2.5 : 2}
                       strokeOpacity={strokeOpacity}
                       dot={false}
-                      activeDot={isLatest ? { r: 6 } : false}
+                      activeDot={
+                        showActiveDot
+                          ? {
+                              r: isLatest ? 6 : 5,
+                              strokeWidth: 1.5,
+                              fill: "#ffffff",
+                              stroke: stroke,
+                            }
+                          : false
+                      }
                       isAnimationActive={false}
                       connectNulls={false}
                     />
