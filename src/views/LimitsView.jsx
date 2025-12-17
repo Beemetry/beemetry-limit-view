@@ -45,9 +45,9 @@ const CHANNELS = {
 const DEFAULT_CHANNEL = "1";
 
 const LIMIT_CHANNEL_RANGES = {
-  "1": [100, 199],
-  "2": [200, 299],
-  "3": [300, 399],
+  "1": [100, 299],
+  "2": [300, 499],
+  "3": [500, 699],
 };
 
 // === Helpers de decimación (LTTB) para performance ===
@@ -400,7 +400,7 @@ const LimitsView = () => {
       if (!isReloadingRef.current) {
         void fetchChartData(chartType, channel);
       }
-    }, 4 * 60 * 1000);
+    }, 60 * 60 * 1000);
     return () => clearInterval(interval);
   }, [chartType, channel, fetchChartData]);
 
