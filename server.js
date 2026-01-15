@@ -13,7 +13,7 @@ const CHANNEL_DIRS = {
   "3": "Fibra_Espesador_ch3",
 };
 // cantidad de archivos recientes a leer por canal (modificar aqui si quieres mas)
-const FILES_PER_CHANNEL = 12;
+const FILES_PER_CHANNEL = 17;
 const PORT = process.env.CH1_API_PORT || 4174;
 
 const parseFilePoints = async (filePath, range) => {

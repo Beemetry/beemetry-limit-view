@@ -28,7 +28,7 @@ const CHART_TYPES = {
   temperatura: {
     key: "temperatura",
     label: "Grafico Temperatura",
-    xMin: 800,
+    xMin: 810,
     xMax: 1620,
     yMin: -600,
     yMax: 600,

@@ -15,7 +15,7 @@ const CHANNEL_DIRS = {
   "3": "Fibra_Espesador_ch3",
 };
 // cantidad de archivos recientes a leer por canal (ajusta aquí si quieres más)
-const FILES_PER_CHANNEL = 12;
+const FILES_PER_CHANNEL = 17;
 const ROOT_DIR = path.resolve(__dirname);
 const CWD_DIR = path.resolve(process.cwd());
 
