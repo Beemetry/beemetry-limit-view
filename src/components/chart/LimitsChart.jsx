@@ -26,6 +26,7 @@ const LimitsChart = ({
   latestFileId,
   fileIds = [],
   fileVisibility = {},
+  hideUnselected = false,
   mode,
   drawingState,
   xDomain,
@@ -157,9 +158,12 @@ const LimitsChart = ({
                 <RTooltip content={renderTooltip} />
 
                 {Object.entries(groupedByFile).map(([fid, series]) => {
-                  const isLatest = latestFileId && fid === latestFileId;
                   const isVisible = fileVisibility[fid] !== false;
-                  const stroke = isLatest ? "#ef4444" : lineColor;
+                  if (hideUnselected && !isVisible) {
+                    return null;
+                  }
+                  const isActive = activeTooltipFileId && fid === activeTooltipFileId;
+                  const stroke = isActive ? "#ef4444" : lineColor;
                   const strokeOpacity = isVisible ? 1 : 0.25;
                   const showActiveDot =
                     activeTooltipFileId === fid || activeTooltipFileId == null;
@@ -170,13 +174,13 @@ const LimitsChart = ({
                       data={series}
                       dataKey="temperature"
                       stroke={stroke}
-                      strokeWidth={isLatest ? 2.5 : 2}
+                      strokeWidth={isActive ? 2.5 : 2}
                       strokeOpacity={strokeOpacity}
                       dot={false}
                       activeDot={
                         showActiveDot
                           ? {
-                              r: isLatest ? 6 : 5,
+                              r: isActive ? 6 : 5,
                               strokeWidth: 1.5,
                               fill: "#ffffff",
                               stroke: stroke,

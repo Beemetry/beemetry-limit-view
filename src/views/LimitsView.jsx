@@ -193,6 +193,7 @@ const LimitsView = () => {
   const [data, setData] = useState([]);
   const [latestFileId, setLatestFileId] = useState(null);
   const [fileVisibility, setFileVisibility] = useState({});
+  const [hideUnselected, setHideUnselected] = useState(false);
   const [limits, setLimits] = useState([]);
   const [isReloading, setIsReloading] = useState(false);
   const [dataError, setDataError] = useState(null);
@@ -800,24 +801,35 @@ const LimitsView = () => {
         {/* Grafico */}
         <div className="flex-1 p-4 relative min-h-0 bg-slate-100 space-y-3">
           {fileIds.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {fileIds.map((fid, idx) => {
-                const isOn = fileVisibility[fid] !== false;
-                return (
-                  <button
-                    key={fid}
-                    onClick={() => toggleFileVisibility(fid)}
-                    className={`text-xs px-3 py-1 rounded-full border transition-colors ${
-                      isOn
-                        ? "bg-blue-50 border-blue-200 text-blue-700"
-                        : "bg-slate-100 border-slate-200 text-slate-400"
-                    }`}
-                    title={fid}
-                  >
-                    Archivo {idx + 1}
-                  </button>
-                );
-              })}
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap gap-2">
+                {fileIds.map((fid, idx) => {
+                  const isOn = fileVisibility[fid] !== false;
+                  return (
+                    <button
+                      key={fid}
+                      onClick={() => toggleFileVisibility(fid)}
+                      className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                        isOn
+                          ? "bg-blue-50 border-blue-200 text-blue-700"
+                          : "bg-slate-100 border-slate-200 text-slate-400"
+                      }`}
+                      title={fid}
+                    >
+                      Archivo {idx + 1}
+                    </button>
+                  );
+                })}
+              </div>
+              <label className="flex items-center gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  className="accent-blue-600"
+                  checked={hideUnselected}
+                  onChange={(e) => setHideUnselected(e.target.checked)}
+                />
+                Ocultar no seleccionados
+              </label>
             </div>
           )}
           <LimitsChart
@@ -828,6 +840,7 @@ const LimitsView = () => {
             latestFileId={latestFileId}
             fileIds={fileIds}
             fileVisibility={fileVisibility}
+            hideUnselected={hideUnselected}
             mode={mode}
             drawingState={drawingState}
             xDomain={xDomain}
