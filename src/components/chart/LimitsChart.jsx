@@ -1,4 +1,4 @@
-// src/components/chart/LimitsChart.jsx
+﻿// src/components/chart/LimitsChart.jsx
 import React from "react";
 import {
   ResponsiveContainer,
@@ -17,6 +17,8 @@ import {
   Y_AXIS_WIDTH,
   X_AXIS_HEIGHT,
 } from "../../config/chartConfig";
+
+const RETURN_REFERENCE_DISTANCE = 1620;
 
 const LimitsChart = ({
   data,
@@ -40,8 +42,9 @@ const LimitsChart = ({
   editingId,
 }) => {
   const hasData = data.length > 0;
-  const yLabel =
-    chartType === "temperatura" ? "Temperatura C°" : "Tension (uE)";
+  const isTemperatureChart = chartType === "temperatura";
+  const yLabel = isTemperatureChart ? "Temperatura C°" : "Tension (uE)";
+
   const groupedByFile = React.useMemo(() => {
     const map = {};
     (visibleData || []).forEach((d) => {
@@ -51,16 +54,18 @@ const LimitsChart = ({
     });
     return map;
   }, [visibleData]);
+
   const visibleOrder = React.useMemo(
     () => fileIds.filter((id) => fileVisibility[id] !== false),
     [fileIds, fileVisibility]
   );
+
+  // Ultimo archivo visible (mas reciente dentro de los seleccionados)
   const activeTooltipFileId =
     visibleOrder.length > 0
-      ? visibleOrder[visibleOrder.length - 1] // último visible (más reciente dentro de los seleccionados)
+      ? visibleOrder[visibleOrder.length - 1]
       : latestFileId || null;
 
-  // Determina índice de archivo (1-based) según orden de fileIds
   const activeIndexLabel = React.useMemo(() => {
     const idx = fileIds.findIndex((id) => id === activeTooltipFileId);
     return idx >= 0 ? idx + 1 : null;
@@ -69,31 +74,41 @@ const LimitsChart = ({
   const renderTooltip = React.useCallback(
     ({ active, payload, label }) => {
       if (!active || !payload || payload.length === 0) return null;
+
       const preferred = payload.find(
         (item) => item.payload?.fileId === activeTooltipFileId
       );
       const selected = preferred || payload[0];
       if (!selected) return null;
+
       const point = selected.payload || {};
+      const xValue = Number.isFinite(point.distance)
+        ? point.distance
+        : Number(label);
+      const inverseDistance =
+        isTemperatureChart && Number.isFinite(xValue)
+          ? RETURN_REFERENCE_DISTANCE - xValue
+          : null;
+
       return (
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-md text-xs space-y-1">
           <div className="font-semibold text-slate-700">
             Archivo #{activeIndexLabel ?? "N/A"}
           </div>
-          <div className="text-slate-600">X: {label}</div>
+          <div className="text-slate-600">
+            X: {Number.isFinite(xValue) ? xValue.toFixed(2) : label}
+          </div>
+          {inverseDistance != null && (
+            <div className="text-slate-600">
+              Distancia aprox: {inverseDistance.toFixed(2)} m
+            </div>
+          )}
           <div className="text-slate-800">Valor: {selected.value}</div>
         </div>
       );
     },
-    [activeTooltipFileId, activeIndexLabel]
+    [activeTooltipFileId, activeIndexLabel, isTemperatureChart]
   );
-
-  const latestSeries =
-    latestFileId && visibleData.length > 0
-      ? visibleData.map((d) =>
-          d.fileId === latestFileId ? d : { ...d, temperature: null }
-        )
-      : null;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 h-full p-4 relative select-none flex flex-col">
@@ -145,6 +160,23 @@ const LimitsChart = ({
                     offset: -5,
                   }}
                 />
+                {isTemperatureChart && (
+                  <XAxis
+                    xAxisId="inverseTop"
+                    dataKey="distance"
+                    type="number"
+                    orientation="top"
+                    domain={xDomain}
+                    allowDataOverflow={true}
+                    height={24}
+                    tickFormatter={(val) =>
+                      (RETURN_REFERENCE_DISTANCE - val).toFixed(0)
+                    }
+                    tick={{ fontSize: 11, fill: "#64748b" }}
+                    axisLine={{ stroke: "#cbd5e1" }}
+                    tickLine={{ stroke: "#cbd5e1" }}
+                  />
+                )}
                 <YAxis
                   domain={yDomain}
                   allowDataOverflow={true}
@@ -162,11 +194,13 @@ const LimitsChart = ({
                   if (hideUnselected && !isVisible) {
                     return null;
                   }
+
                   const isActive = activeTooltipFileId && fid === activeTooltipFileId;
                   const stroke = isActive ? "#ef4444" : lineColor;
                   const strokeOpacity = isVisible ? 1 : 0.25;
                   const showActiveDot =
                     activeTooltipFileId === fid || activeTooltipFileId == null;
+
                   return (
                     <Line
                       key={fid}
@@ -183,7 +217,7 @@ const LimitsChart = ({
                               r: isActive ? 6 : 5,
                               strokeWidth: 1.5,
                               fill: "#ffffff",
-                              stroke: stroke,
+                              stroke,
                             }
                           : false
                       }
@@ -200,9 +234,7 @@ const LimitsChart = ({
                       { x: limit.start, y: limit.threshold },
                       { x: limit.end, y: limit.threshold },
                     ]}
-                    stroke={
-                      editingId === limit.id ? "#3b82f6" : "#ef4444"
-                    }
+                    stroke={editingId === limit.id ? "#3b82f6" : "#ef4444"}
                     strokeWidth={editingId === limit.id ? 3 : 2}
                     strokeDasharray="5 5"
                     label={{
@@ -235,28 +267,16 @@ const LimitsChart = ({
                     )}
 
                     <ReferenceArea
-                      x1={Math.min(
-                        drawingState.startX,
-                        drawingState.endX
-                      )}
-                      x2={Math.max(
-                        drawingState.startX,
-                        drawingState.endX
-                      )}
+                      x1={Math.min(drawingState.startX, drawingState.endX)}
+                      x2={Math.max(drawingState.startX, drawingState.endX)}
                       y1={
                         mode === "zoom"
-                          ? Math.min(
-                              drawingState.startY,
-                              drawingState.endY
-                            )
+                          ? Math.min(drawingState.startY, drawingState.endY)
                           : initialStats.yMin
                       }
                       y2={
                         mode === "zoom"
-                          ? Math.max(
-                              drawingState.startY,
-                              drawingState.endY
-                            )
+                          ? Math.max(drawingState.startY, drawingState.endY)
                           : drawingState.startY
                       }
                       fill={mode === "zoom" ? "#3b82f6" : "#f59e0b"}
