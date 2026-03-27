@@ -12,15 +12,29 @@ const DATA_ROOT = path.resolve(__dirname, "src", "Fibra Exportada");
 const ROOT_DIR = path.resolve(__dirname);
 const CWD_DIR = path.resolve(process.cwd());
 
+const readRequestBody = (req) =>
+  new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => {
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf-8"));
+    });
+    req.on("error", reject);
+  });
+
 const buildDataMiddleware = () => {
   return async (req, res, next) => {
     const urlString = req.originalUrl || req.url || "";
+    const bodyText = req.method === "POST" ? await readRequestBody(req) : "";
 
     const result = await handleCh1ApiRequest({
       method: req.method,
       urlString,
       host: "localhost",
       dataRoot: DATA_ROOT,
+      bodyText,
       logger: ({ channel, type, selectedCount, usedTodayFilter, todayKeys }) => {
         console.log(
           `[ch] ${urlString} channel=${channel} type=${type} selected=${selectedCount} todayFilter=${usedTodayFilter} todayKeys=${todayKeys.join(",")}`

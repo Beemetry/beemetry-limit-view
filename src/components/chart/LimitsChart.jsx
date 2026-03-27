@@ -1,4 +1,3 @@
-﻿// src/components/chart/LimitsChart.jsx
 import React from "react";
 import {
   ResponsiveContainer,
@@ -8,7 +7,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip as RTooltip,
-  ReferenceLine,
   ReferenceArea,
 } from "recharts";
 import { Upload } from "lucide-react";
@@ -21,7 +19,7 @@ import {
 const RETURN_REFERENCE_DISTANCE = 1620;
 
 const LimitsChart = ({
-  data,
+  hasData,
   visibleData,
   lineColor = "#3b82f6",
   chartType,
@@ -29,8 +27,10 @@ const LimitsChart = ({
   fileIds = [],
   fileVisibility = {},
   hideUnselected = false,
-  mode,
-  drawingState,
+  thresholdSeries = [],
+  activeReferenceFileId,
+  activeReferenceIndex,
+  zoomSelection,
   xDomain,
   yDomain,
   initialStats,
@@ -38,19 +38,18 @@ const LimitsChart = ({
   onMouseDown,
   onMouseMove,
   onMouseUp,
-  limits,
-  editingId,
 }) => {
-  const hasData = data.length > 0;
   const isTemperatureChart = chartType === "temperatura";
   const yLabel = isTemperatureChart ? "Temperatura C°" : "Tension (uE)";
 
   const groupedByFile = React.useMemo(() => {
     const map = {};
-    (visibleData || []).forEach((d) => {
-      const fid = d.fileId || "default";
-      if (!map[fid]) map[fid] = [];
-      map[fid].push(d);
+    (visibleData || []).forEach((point) => {
+      const fid = point.fileId || "default";
+      if (!map[fid]) {
+        map[fid] = [];
+      }
+      map[fid].push(point);
     });
     return map;
   }, [visibleData]);
@@ -60,26 +59,29 @@ const LimitsChart = ({
     [fileIds, fileVisibility]
   );
 
-  // Ultimo archivo visible (mas reciente dentro de los seleccionados)
-  const activeTooltipFileId =
-    visibleOrder.length > 0
+  const tooltipFileId =
+    activeReferenceFileId ||
+    (visibleOrder.length > 0
       ? visibleOrder[visibleOrder.length - 1]
-      : latestFileId || null;
-
-  const activeIndexLabel = React.useMemo(() => {
-    const idx = fileIds.findIndex((id) => id === activeTooltipFileId);
-    return idx >= 0 ? idx + 1 : null;
-  }, [activeTooltipFileId, fileIds]);
+      : latestFileId || null);
 
   const renderTooltip = React.useCallback(
     ({ active, payload, label }) => {
-      if (!active || !payload || payload.length === 0) return null;
+      if (!active || !payload || payload.length === 0) {
+        return null;
+      }
 
-      const preferred = payload.find(
-        (item) => item.payload?.fileId === activeTooltipFileId
+      const actualPayload = payload.filter((item) => item.dataKey === "temperature");
+      const thresholdPayload = payload.filter(
+        (item) => item.dataKey === "thresholdValue"
       );
-      const selected = preferred || payload[0];
-      if (!selected) return null;
+      const preferred = actualPayload.find(
+        (item) => item.payload?.fileId === tooltipFileId
+      );
+      const selected = preferred || actualPayload[0];
+      if (!selected) {
+        return null;
+      }
 
       const point = selected.payload || {};
       const xValue = Number.isFinite(point.distance)
@@ -93,21 +95,46 @@ const LimitsChart = ({
       return (
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-md text-xs space-y-1">
           <div className="font-semibold text-slate-700">
-            Archivo #{activeIndexLabel ?? "N/A"}
+            {activeReferenceIndex ?? "N/A"}
           </div>
           <div className="text-slate-600">
-            X: {Number.isFinite(xValue) ? xValue.toFixed(2) : label}
+            Distancia aproximada:{" "}
+            {Number.isFinite(xValue) ? xValue.toFixed(2) : label} m
+          </div>
+          <div className="text-slate-800">
+            {isTemperatureChart ? "Temperatura (Y)" : "Tension (Y)"}:{" "}
+            {selected.value}
           </div>
           {inverseDistance != null && (
             <div className="text-slate-600">
-              Distancia aprox: {inverseDistance.toFixed(2)} m
+              Distancia de retorno: {inverseDistance.toFixed(2)} m
             </div>
           )}
-          <div className="text-slate-800">Valor: {selected.value}</div>
+          {thresholdPayload.length > 0 && (
+            <div className="pt-1 border-t border-slate-100 space-y-1">
+              {thresholdPayload.map((item) => (
+                <div
+                  key={`${item.name}-${item.color}`}
+                  className="flex items-center justify-between gap-3"
+                >
+                  <span className="flex items-center gap-2 text-slate-700">
+                    <span
+                      className="w-2 h-2 rounded-full block"
+                      style={{ backgroundColor: item.color }}
+                    />
+                    {item.name}:
+                  </span>
+                  <span className="font-medium text-slate-700">
+                    {Number.isFinite(item.value) ? item.value.toFixed(2) : item.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       );
     },
-    [activeTooltipFileId, activeIndexLabel, isTemperatureChart]
+    [activeReferenceIndex, isTemperatureChart, tooltipFileId]
   );
 
   return (
@@ -116,7 +143,7 @@ const LimitsChart = ({
         <div className="flex flex-col items-center justify-center text-slate-400 h-full">
           <Upload size={48} className="mb-4 opacity-50" />
           <p className="text-lg font-medium">No hay datos cargados</p>
-          <p className="text-sm">Sube uno o varios archivos .txt para visualizar</p>
+          <p className="text-sm">Usa Recargar para consultar nuevas lecturas</p>
         </div>
       ) : (
         <>
@@ -124,25 +151,18 @@ const LimitsChart = ({
             <span>
               Vista: {xDomain[0].toFixed(0)}m - {xDomain[1].toFixed(0)}m
             </span>
-            <span
-              className={`text-xs px-2 py-0.5 rounded shadow-sm ${
-                mode === "draw"
-                  ? "bg-red-100 text-red-600"
-                  : "bg-blue-100 text-blue-600"
-              }`}
-            >
-              {mode === "draw" ? "MODO DIBUJO" : "MODO ZOOM"}
+            <span className="text-xs px-2 py-0.5 rounded shadow-sm bg-blue-100 text-blue-600">
+              ZOOM HORIZONTAL
             </span>
           </h2>
 
           <div
             ref={chartContainerRef}
-            className={`w-full h-[520px] md:h-[600px] pt-6 ${
-              mode === "draw" ? "cursor-crosshair" : "cursor-zoom-in"
-            }`}
+            className="w-full h-[520px] md:h-[600px] pt-6 cursor-ew-resize"
             onMouseDown={onMouseDown}
             onMouseMove={onMouseMove}
             onMouseUp={onMouseUp}
+            onMouseLeave={onMouseUp}
           >
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={visibleData} margin={CHART_MARGINS}>
@@ -153,7 +173,7 @@ const LimitsChart = ({
                   domain={xDomain}
                   allowDataOverflow={true}
                   height={X_AXIS_HEIGHT}
-                  tickFormatter={(val) => val.toFixed(0)}
+                  tickFormatter={(value) => value.toFixed(0)}
                   label={{
                     value: "Distancia (m)",
                     position: "insideBottomRight",
@@ -169,9 +189,14 @@ const LimitsChart = ({
                     domain={xDomain}
                     allowDataOverflow={true}
                     height={24}
-                    tickFormatter={(val) =>
-                      (RETURN_REFERENCE_DISTANCE - val).toFixed(0)
+                    tickFormatter={(value) =>
+                      (RETURN_REFERENCE_DISTANCE - value).toFixed(0)
                     }
+                    label={{
+                      value: "Retorno (m)",
+                      position: "insideTopRight",
+                      offset: 0,
+                    }}
                     tick={{ fontSize: 11, fill: "#64748b" }}
                     axisLine={{ stroke: "#cbd5e1" }}
                     tickLine={{ stroke: "#cbd5e1" }}
@@ -195,11 +220,10 @@ const LimitsChart = ({
                     return null;
                   }
 
-                  const isActive = activeTooltipFileId && fid === activeTooltipFileId;
+                  const isActive = tooltipFileId && fid === tooltipFileId;
                   const stroke = isActive ? "#ef4444" : lineColor;
                   const strokeOpacity = isVisible ? 1 : 0.25;
-                  const showActiveDot =
-                    activeTooltipFileId === fid || activeTooltipFileId == null;
+                  const showActiveDot = tooltipFileId === fid || tooltipFileId == null;
 
                   return (
                     <Line
@@ -208,7 +232,7 @@ const LimitsChart = ({
                       data={series}
                       dataKey="temperature"
                       stroke={stroke}
-                      strokeWidth={isActive ? 2.5 : 2}
+                      strokeWidth={isActive ? 2.25 : 1.9}
                       strokeOpacity={strokeOpacity}
                       dot={false}
                       activeDot={
@@ -227,62 +251,33 @@ const LimitsChart = ({
                   );
                 })}
 
-                {limits.map((limit) => (
-                  <ReferenceLine
-                    key={limit.id}
-                    segment={[
-                      { x: limit.start, y: limit.threshold },
-                      { x: limit.end, y: limit.threshold },
-                    ]}
-                    stroke={editingId === limit.id ? "#3b82f6" : "#ef4444"}
-                    strokeWidth={editingId === limit.id ? 3 : 2}
-                    strokeDasharray="5 5"
-                    label={{
-                      value: `${limit.customId}`,
-                      position: "top",
-                      fill: "#ef4444",
-                      fontSize: 10,
-                    }}
+                {thresholdSeries.map((level) => (
+                  <Line
+                    key={level.id}
+                    type="linear"
+                    data={level.points}
+                    dataKey="thresholdValue"
+                    name={level.thresholdLabel}
+                    stroke={level.color}
+                    strokeWidth={1.75}
+                    strokeDasharray="6 4"
+                    dot={false}
+                    activeDot={false}
+                    isAnimationActive={false}
+                    connectNulls={false}
                   />
                 ))}
 
-                {drawingState.isDrawing && (
-                  <>
-                    {mode === "draw" && (
-                      <ReferenceLine
-                        segment={[
-                          {
-                            x: drawingState.startX,
-                            y: drawingState.startY,
-                          },
-                          {
-                            x: drawingState.endX,
-                            y: drawingState.startY,
-                          },
-                        ]}
-                        stroke="#f59e0b"
-                        strokeWidth={2}
-                        strokeDasharray="3 3"
-                      />
-                    )}
-
-                    <ReferenceArea
-                      x1={Math.min(drawingState.startX, drawingState.endX)}
-                      x2={Math.max(drawingState.startX, drawingState.endX)}
-                      y1={
-                        mode === "zoom"
-                          ? Math.min(drawingState.startY, drawingState.endY)
-                          : initialStats.yMin
-                      }
-                      y2={
-                        mode === "zoom"
-                          ? Math.max(drawingState.startY, drawingState.endY)
-                          : drawingState.startY
-                      }
-                      fill={mode === "zoom" ? "#3b82f6" : "#f59e0b"}
-                      fillOpacity={0.2}
-                    />
-                  </>
+                {zoomSelection.isSelecting && (
+                  <ReferenceArea
+                    x1={Math.min(zoomSelection.startX, zoomSelection.endX)}
+                    x2={Math.max(zoomSelection.startX, zoomSelection.endX)}
+                    y1={yDomain[0]}
+                    y2={yDomain[1]}
+                    fill="#3b82f6"
+                    fillOpacity={0.14}
+                    strokeOpacity={0}
+                  />
                 )}
               </LineChart>
             </ResponsiveContainer>

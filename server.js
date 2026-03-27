@@ -9,12 +9,28 @@ const __dirname = path.dirname(__filename);
 const DATA_ROOT = path.join(__dirname, "src", "Fibra Exportada");
 const PORT = process.env.CH1_API_PORT || 4174;
 
+const readRequestBody = (req) =>
+  new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => {
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf-8"));
+    });
+    req.on("error", reject);
+  });
+
 const handleRequest = async (req, res) => {
+  const bodyText =
+    req.method === "POST" ? await readRequestBody(req) : "";
+
   const result = await handleCh1ApiRequest({
     method: req.method,
     urlString: req.url || "",
     host: req.headers.host || "localhost",
     dataRoot: DATA_ROOT,
+    bodyText,
     logger: ({ channel, type, selectedCount, usedTodayFilter, todayKeys }) => {
       console.log(
         `[ch] channel=${channel} type=${type} selected=${selectedCount} todayFilter=${usedTodayFilter} todayKeys=${todayKeys.join(",")}`

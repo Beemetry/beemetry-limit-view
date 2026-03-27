@@ -1,4 +1,3 @@
-// src/views/LimitsView.jsx
 import React, {
   useState,
   useRef,
@@ -6,12 +5,7 @@ import React, {
   useCallback,
   useEffect,
 } from "react";
-import {
-  CHART_MARGINS,
-  Y_AXIS_WIDTH,
-  X_AXIS_HEIGHT,
-  Y_POINTER_OFFSET,
-} from "../config/chartConfig";
+import { CHART_MARGINS, Y_AXIS_WIDTH } from "../config/chartConfig";
 import HeaderBar from "../components/layout/HeaderBar";
 import LimitsChart from "../components/chart/LimitsChart";
 import ControlPanel from "../components/panel/ControlPanel";
@@ -22,37 +16,62 @@ const CHART_TYPES = {
     label: "Grafico Tension",
     xMin: 0,
     xMax: 810,
-    yMin: -1000,
-    yMax: 1000,
+    yMin: -1600,
+    yMax: 1600,
   },
   temperatura: {
     key: "temperatura",
     label: "Grafico Temperatura",
     xMin: 810,
     xMax: 1620,
-    yMin: -600,
-    yMax: 600,
+    yMin: -50,
+    yMax: 150,
   },
+};
+const RANGE_MODES = {
+  default: "correspondiente",
+  full: "completo",
+};
+const NOISE_MODES = {
+  raw: "raw",
+  std: "std",
+};
+const FULL_X_RANGE = {
+  xMin: 0,
+  xMax: 1620,
 };
 
 const DEFAULT_CHART_TYPE = "tension";
 const DEFAULT_RANGE = CHART_TYPES[DEFAULT_CHART_TYPE];
-const CHANNELS = {
-  "1": { id: "1", label: "Canal 1", color: "#7c3aed" }, // morado
-  "2": { id: "2", label: "Canal 2", color: "#22c55e" }, // verde
-  "3": { id: "3", label: "Canal 3", color: "#b45309" }, // marrón
-};
 const DEFAULT_CHANNEL = "1";
-
-const LIMIT_CHANNEL_RANGES = {
-  "1": [100, 299],
-  "2": [300, 499],
-  "3": [500, 699],
+const CHANNELS = {
+  "1": { id: "1", label: "Canal 1", color: "#7c3aed" },
+  "2": { id: "2", label: "Canal 2", color: "#22c55e" },
+  "2_div5": {
+    id: "2",
+    label: "Canal 2 (/5)",
+    color: "#22c55e",
+    valueDivisor: 5,
+  },
+  "3": { id: "3", label: "Canal 3", color: "#b45309" },
 };
+const THRESHOLD_COLORS = [
+  "#2563eb",
+  "#f59e0b",
+  "#14b8a6",
+  "#ec4899",
+  "#6366f1",
+  "#f97316",
+];
+const DEFAULT_THRESHOLD_INPUT = "20";
+const MAX_CHART_POINTS = 4000;
+const FLOOR_REFERENCE_PERCENT = 20;
+const FLOOR_AT_REFERENCE_PERCENT = 5;
+const MIN_POINTER_DELTA_X = 1;
+const MIN_ZOOM_RATIO = 0.005;
+const MONITOR_POLL_MS = 2000;
+const THRESHOLD_CACHE_KEY = "beemetry-thresholds-cache";
 
-// === Helpers de decimación (LTTB) para performance ===
-
-// Algoritmo Largest-Triangle-Three-Buckets sobre un segmento sin nulls
 const lttbSegment = (segment, threshold) => {
   const dataLength = segment.length;
   if (threshold >= dataLength || threshold <= 0) {
@@ -61,46 +80,40 @@ const lttbSegment = (segment, threshold) => {
 
   const sampled = [];
   let sampledIndex = 0;
-
   const every = (dataLength - 2) / (threshold - 2);
-
-  let a = 0; // primer punto
+  let a = 0;
   let maxArea;
   let maxAreaPoint;
   let nextA;
 
   sampled[sampledIndex++] = segment[a];
 
-  for (let i = 0; i < threshold - 2; i++) {
-    // promedio del siguiente bucket
+  for (let index = 0; index < threshold - 2; index += 1) {
     let avgX = 0;
     let avgY = 0;
-    let avgRangeStart = Math.floor((i + 1) * every) + 1;
-    let avgRangeEnd = Math.floor((i + 2) * every) + 1;
+    let avgRangeStart = Math.floor((index + 1) * every) + 1;
+    let avgRangeEnd = Math.floor((index + 2) * every) + 1;
     avgRangeEnd = avgRangeEnd < dataLength ? avgRangeEnd : dataLength;
 
     const avgRangeLength = avgRangeEnd - avgRangeStart || 1;
-    for (let idx = avgRangeStart; idx < avgRangeEnd; idx++) {
-      avgX += segment[idx].distance;
-      avgY += segment[idx].temperature;
+    for (let avgIndex = avgRangeStart; avgIndex < avgRangeEnd; avgIndex += 1) {
+      avgX += segment[avgIndex].distance;
+      avgY += segment[avgIndex].temperature;
     }
     avgX /= avgRangeLength;
     avgY /= avgRangeLength;
 
-    // rango del bucket actual
-    let rangeOffs = Math.floor(i * every) + 1;
-    let rangeTo = Math.floor((i + 1) * every) + 1;
+    let rangeOffs = Math.floor(index * every) + 1;
+    let rangeTo = Math.floor((index + 1) * every) + 1;
     rangeTo = rangeTo < dataLength ? rangeTo : dataLength - 1;
 
     const pointAx = segment[a].distance;
     const pointAy = segment[a].temperature;
-
     maxArea = -1;
 
-    for (let idx = rangeOffs; idx <= rangeTo; idx++) {
-      const pointBx = segment[idx].distance;
-      const pointBy = segment[idx].temperature;
-
+    for (let pointIndex = rangeOffs; pointIndex <= rangeTo; pointIndex += 1) {
+      const pointBx = segment[pointIndex].distance;
+      const pointBy = segment[pointIndex].temperature;
       const area = Math.abs(
         (pointAx - avgX) * (pointBy - pointAy) -
           (pointAx - pointBx) * (avgY - pointAy)
@@ -108,8 +121,8 @@ const lttbSegment = (segment, threshold) => {
 
       if (area > maxArea) {
         maxArea = area;
-        maxAreaPoint = segment[idx];
-        nextA = idx;
+        maxAreaPoint = segment[pointIndex];
+        nextA = pointIndex;
       }
     }
 
@@ -118,95 +131,209 @@ const lttbSegment = (segment, threshold) => {
   }
 
   sampled[sampledIndex++] = segment[dataLength - 1];
-
   return sampled;
 };
 
-// Decimación por segmentos respetando los puntos "gap" (temperature === null)
 const decimateVisibleData = (data, maxPoints) => {
-  if (!data || data.length === 0) return data;
+  if (!data || data.length === 0) {
+    return data;
+  }
 
-  // total de puntos válidos (no null)
   const nonNullTotal = data.reduce(
-    (acc, d) => (d.temperature != null ? acc + 1 : acc),
+    (accumulator, point) =>
+      point.temperature != null ? accumulator + 1 : accumulator,
     0
   );
-  if (nonNullTotal <= maxPoints) return data;
+
+  if (nonNullTotal <= maxPoints) {
+    return data;
+  }
 
   const segments = [];
   let currentSegment = [];
 
-  // separa en segmentos contiguos sin nulls y puntos de gap
-  for (let i = 0; i < data.length; i++) {
-    const d = data[i];
-    if (d.temperature == null || Number.isNaN(d.temperature)) {
+  for (let index = 0; index < data.length; index += 1) {
+    const point = data[index];
+    if (point.temperature == null || Number.isNaN(point.temperature)) {
       if (currentSegment.length > 0) {
         segments.push({ type: "line", points: currentSegment });
         currentSegment = [];
       }
-      // mantenemos el punto null como gap explícito
-      segments.push({ type: "gap", points: [d] });
+      segments.push({ type: "gap", points: [point] });
     } else {
-      currentSegment.push(d);
+      currentSegment.push(point);
     }
   }
+
   if (currentSegment.length > 0) {
     segments.push({ type: "line", points: currentSegment });
   }
 
   const result = [];
 
-  // aplica LTTB por segmento proporcional al tamaño
-  segments.forEach((seg) => {
-    if (seg.type === "gap") {
-      // gaps se conservan tal cual para no unir archivos
-      result.push(...seg.points);
+  segments.forEach((segment) => {
+    if (segment.type === "gap") {
+      result.push(...segment.points);
       return;
     }
 
-    const segLen = seg.points.length;
-    if (segLen <= 3) {
-      result.push(...seg.points);
+    const segmentLength = segment.points.length;
+    if (segmentLength <= 3) {
+      result.push(...segment.points);
       return;
     }
 
-    const segThreshold = Math.max(
+    const segmentThreshold = Math.max(
       3,
-      Math.round((segLen / nonNullTotal) * maxPoints)
+      Math.round((segmentLength / nonNullTotal) * maxPoints)
     );
 
-    if (segLen <= segThreshold) {
-      result.push(...seg.points);
-    } else {
-      const decimated = lttbSegment(seg.points, segThreshold);
-      result.push(...decimated);
+    if (segmentLength <= segmentThreshold) {
+      result.push(...segment.points);
+      return;
     }
+
+    result.push(...lttbSegment(segment.points, segmentThreshold));
   });
 
   return result;
 };
 
+const getThresholdFloor = (percent) =>
+  (FLOOR_AT_REFERENCE_PERCENT * percent) / FLOOR_REFERENCE_PERCENT;
+
+const getThresholdValue = (value, percent) => {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  const factor = percent / 100;
+  const margin = Math.max(getThresholdFloor(percent), Math.abs(value) * factor);
+  return Number((value + margin).toFixed(3));
+};
+
+const formatAlertTime = (isoValue) => {
+  if (!isoValue) {
+    return "--:--:--";
+  }
+
+  const date = new Date(isoValue);
+  if (Number.isNaN(date.getTime())) {
+    return "--:--:--";
+  }
+
+  return date.toLocaleTimeString();
+};
+
+const domainsAreEqual = (a, b) =>
+  Math.abs(a[0] - b[0]) < 0.000001 && Math.abs(a[1] - b[1]) < 0.000001;
+
+const applyStdNoiseReduction = (points) => {
+  const samplesByDistance = new Map();
+
+  points.forEach((point) => {
+    if (
+      point.temperature == null ||
+      Number.isNaN(point.temperature) ||
+      !Number.isFinite(point.distance)
+    ) {
+      return;
+    }
+
+    const key = point.distance.toFixed(3);
+    if (!samplesByDistance.has(key)) {
+      samplesByDistance.set(key, []);
+    }
+    samplesByDistance.get(key).push(point.temperature);
+  });
+
+  const statsByDistance = new Map();
+  samplesByDistance.forEach((samples, key) => {
+    if (samples.length < 2) {
+      return;
+    }
+
+    const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+    const variance =
+      samples.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+      samples.length;
+    const stdDev = Math.sqrt(variance);
+
+    statsByDistance.set(key, { mean, stdDev });
+  });
+
+  return points.map((point) => {
+    if (
+      point.temperature == null ||
+      Number.isNaN(point.temperature) ||
+      !Number.isFinite(point.distance)
+    ) {
+      return point;
+    }
+
+    const key = point.distance.toFixed(3);
+    const stats = statsByDistance.get(key);
+    if (!stats || !Number.isFinite(stats.stdDev) || stats.stdDev === 0) {
+      return point;
+    }
+
+    const lower = stats.mean - stats.stdDev;
+    const upper = stats.mean + stats.stdDev;
+    const filtered = Math.min(upper, Math.max(lower, point.temperature));
+    if (Math.abs(filtered - point.temperature) < 0.000001) {
+      return point;
+    }
+
+    return {
+      ...point,
+      temperature: Number(filtered.toFixed(3)),
+    };
+  });
+};
+
+const loadCachedThresholds = () => {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(THRESHOLD_CACHE_KEY);
+    if (!rawValue) {
+      return [];
+    }
+
+    const parsed = JSON.parse(rawValue);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
 const LimitsView = () => {
-  // --- Estados principales ---
   const [chartType, setChartType] = useState(DEFAULT_CHART_TYPE);
   const [channel, setChannel] = useState(DEFAULT_CHANNEL);
+  const [rangeMode, setRangeMode] = useState(RANGE_MODES.default);
+  const [noiseMode, setNoiseMode] = useState(NOISE_MODES.raw);
   const [data, setData] = useState([]);
   const [latestFileId, setLatestFileId] = useState(null);
   const [fileVisibility, setFileVisibility] = useState({});
   const [hideUnselected, setHideUnselected] = useState(false);
-  const [limits, setLimits] = useState([]);
+  const [thresholdInput, setThresholdInput] = useState(DEFAULT_THRESHOLD_INPUT);
+  const [thresholdColor, setThresholdColor] = useState(THRESHOLD_COLORS[0]);
+  const [thresholdSoundEnabled, setThresholdSoundEnabled] = useState(false);
+  const [thresholdLevels, setThresholdLevels] = useState(loadCachedThresholds);
+  const [alerts, setAlerts] = useState([]);
+  const [alertsPanelOpen, setAlertsPanelOpen] = useState(true);
+  const [soundPanelOpen, setSoundPanelOpen] = useState(true);
+  const [soundMuted, setSoundMuted] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
   const [dataError, setDataError] = useState(null);
-
-  const [nextId, setNextId] = useState(100);
-
   const [initialStats, setInitialStats] = useState({
     xMin: DEFAULT_RANGE.xMin,
     xMax: DEFAULT_RANGE.xMax,
     yMin: DEFAULT_RANGE.yMin,
     yMax: DEFAULT_RANGE.yMax,
   });
-
   const [xDomain, setXDomain] = useState([
     DEFAULT_RANGE.xMin,
     DEFAULT_RANGE.xMax,
@@ -215,64 +342,44 @@ const LimitsView = () => {
     DEFAULT_RANGE.yMin,
     DEFAULT_RANGE.yMax,
   ]);
-
-  const [mode, setMode] = useState("zoom"); // 'zoom' | 'draw'
-  const [editingId, setEditingId] = useState(null);
-
-  const [drawingState, setDrawingState] = useState({
-    isDrawing: false,
+  const [zoomSelection, setZoomSelection] = useState({
+    isSelecting: false,
     startX: null,
-    startY: null,
     endX: null,
-    endY: null,
-  });
-
-  const [currentLimitForm, setCurrentLimitForm] = useState({
-    start: 0,
-    end: 0,
-    threshold: 0,
-    tolerance: 5,
-    type: 3,
   });
 
   const chartContainerRef = useRef(null);
   const rafRef = useRef(null);
   const chartRectRef = useRef(null);
-  const lastDrawCoordsRef = useRef(null);
+  const lastPointerXRef = useRef(null);
   const isReloadingRef = useRef(false);
+  const latestFileRef = useRef(null);
+  const seenAlertIdsRef = useRef(new Set());
+  const soundPanelOpenRef = useRef(true);
+  const soundMutedRef = useRef(false);
+  const audioContextRef = useRef(null);
 
-  const filteredLimits = useMemo(() => {
-    const range = LIMIT_CHANNEL_RANGES[channel];
-    const scopedLimits =
-      range && range.length === 2
-        ? limits.filter((limit) => {
-            const customId = Number(limit.customId);
-            return (
-              !Number.isNaN(customId) &&
-              customId >= range[0] &&
-              customId <= range[1]
-            );
-          })
-        : limits;
-
-    return scopedLimits
-      .slice()
-      .sort((a, b) => {
-        const aCustom = Number(a.customId);
-        const bCustom = Number(b.customId);
-
-        if (!Number.isNaN(aCustom) && !Number.isNaN(bCustom) && aCustom !== bCustom) {
-          return bCustom - aCustom;
-        }
-
-        return Number(b.id) - Number(a.id);
-      });
-  }, [channel, limits]);
-
-  const getRangeForChart = useCallback(
-    (type) => CHART_TYPES[type] || CHART_TYPES.tension,
+  const getApiBase = useCallback(
+    () => import.meta.env.VITE_CH1_API || window.location.origin,
     []
   );
+
+  const getRangeForChart = useCallback(
+    (type, selectedRangeMode = RANGE_MODES.default) => {
+      const baseRange = CHART_TYPES[type] || CHART_TYPES.tension;
+      if (selectedRangeMode === RANGE_MODES.full) {
+        return {
+          ...baseRange,
+          xMin: FULL_X_RANGE.xMin,
+          xMax: FULL_X_RANGE.xMax,
+        };
+      }
+      return baseRange;
+    },
+    []
+  );
+
+  const currentTypeParam = chartType === "tension" ? "str" : "tem";
 
   const applyChartRange = useCallback((range) => {
     const yMin = range.yMin ?? DEFAULT_RANGE.yMin;
@@ -286,58 +393,245 @@ const LimitsView = () => {
     });
     setXDomain([range.xMin, range.xMax]);
     setYDomain([yMin, yMax]);
+    setZoomSelection({
+      isSelecting: false,
+      startX: null,
+      endX: null,
+    });
   }, []);
 
-  // --- OPTIMIZACIÓN DE DATOS (WINDOWING) ---
-    // --- OPTIMIZACIÓN DE DATOS (WINDOWING) ---
+  const processedData = useMemo(() => {
+    if (noiseMode === NOISE_MODES.std) {
+      return applyStdNoiseReduction(data);
+    }
+    return data;
+  }, [data, noiseMode]);
+
   const visibleData = useMemo(() => {
-    if (data.length === 0) return [];
+    if (processedData.length === 0) {
+      return [];
+    }
 
     const currentXMin = xDomain[0];
     const currentXMax = xDomain[1];
     const range = currentXMax - currentXMin || 1;
-
-    // Buffer más pequeño para no incluir TODO el dataset
-    const buffer = Math.min(range * 0.1, 100); // 10% o máx 100 m
-
+    const buffer = Math.min(range * 0.1, 100);
     const minVisible = currentXMin - buffer;
     const maxVisible = currentXMax + buffer;
 
-    return data.filter(
-      (d) =>
-        ((d.distance >= minVisible && d.distance <= maxVisible) ||
-          d.temperature === null)
+    return processedData.filter(
+      (point) =>
+        (point.distance >= minVisible && point.distance <= maxVisible) ||
+        point.temperature === null
     );
-  }, [data, xDomain]);
-
-  const MAX_CHART_POINTS = 4000; // ajustable
+  }, [processedData, xDomain]);
 
   const chartData = useMemo(() => {
-    if (!visibleData || visibleData.length === 0) return [];
+    if (!visibleData || visibleData.length === 0) {
+      return [];
+    }
+
     return decimateVisibleData(visibleData, MAX_CHART_POINTS);
   }, [visibleData]);
 
   const fileIds = useMemo(() => {
     const ids = new Set();
-    data.forEach((d) => {
-      if (d.fileId) ids.add(d.fileId);
+    data.forEach((point) => {
+      if (point.fileId) {
+        ids.add(point.fileId);
+      }
     });
     return Array.from(ids);
   }, [data]);
 
+  const activeFileIds = useMemo(
+    () => fileIds.filter((id) => fileVisibility[id] !== false),
+    [fileIds, fileVisibility]
+  );
+
+  const activeReferenceFileId = useMemo(() => {
+    if (activeFileIds.length > 0) {
+      return activeFileIds[activeFileIds.length - 1];
+    }
+
+    return latestFileId || fileIds[fileIds.length - 1] || null;
+  }, [activeFileIds, fileIds, latestFileId]);
+
+  const activeReferenceIndex = useMemo(() => {
+    const index = fileIds.findIndex((id) => id === activeReferenceFileId);
+    return index >= 0 ? index + 1 : null;
+  }, [activeReferenceFileId, fileIds]);
+
+  const sortedThresholdLevels = useMemo(
+    () =>
+      [...thresholdLevels].sort((a, b) => {
+        if (a.percent !== b.percent) {
+          return a.percent - b.percent;
+        }
+        return String(a.id).localeCompare(String(b.id));
+      }),
+    [thresholdLevels]
+  );
+
+  const visibleThresholdSeries = useMemo(() => {
+    const currentXMin = xDomain[0];
+    const currentXMax = xDomain[1];
+    const range = currentXMax - currentXMin || 1;
+    const buffer = Math.min(range * 0.1, 100);
+    const minVisible = currentXMin - buffer;
+    const maxVisible = currentXMax + buffer;
+
+    return sortedThresholdLevels
+      .filter((level) => level.type === currentTypeParam)
+      .map((level) => ({
+        ...level,
+        points: level.points.filter(
+          (point) => point.distance >= minVisible && point.distance <= maxVisible
+        ),
+      }));
+  }, [currentTypeParam, sortedThresholdLevels, xDomain]);
+
+  const soundThresholdCount = useMemo(
+    () => thresholdLevels.filter((level) => level.soundEnabled).length,
+    [thresholdLevels]
+  );
+
+  const syncPayload = useMemo(
+    () =>
+      thresholdLevels.map((level) => ({
+        id: level.id,
+        percent: level.percent,
+        floor: level.floor,
+        color: level.color,
+        sourceFileId: level.sourceFileId,
+        sourceFileIndex: level.sourceFileIndex,
+        soundEnabled: level.soundEnabled,
+        type: level.type,
+        thresholdLabel: level.thresholdLabel,
+        points: level.points,
+      })),
+    [thresholdLevels]
+  );
+
+  const computeYDomainForRange = useCallback(
+    (rangeX) => {
+      const [minX, maxX] = rangeX;
+      const selectedFileSet = new Set(
+        fileIds.filter((id) => fileVisibility[id] !== false)
+      );
+
+      let minY = Number.POSITIVE_INFINITY;
+      let maxY = Number.NEGATIVE_INFINITY;
+
+      processedData.forEach((point) => {
+        if (point.temperature == null || Number.isNaN(point.temperature)) {
+          return;
+        }
+        if (point.distance < minX || point.distance > maxX) {
+          return;
+        }
+        if (hideUnselected && point.fileId && !selectedFileSet.has(point.fileId)) {
+          return;
+        }
+
+        minY = Math.min(minY, point.temperature);
+        maxY = Math.max(maxY, point.temperature);
+      });
+
+      thresholdLevels.forEach((level) => {
+        if (level.type !== currentTypeParam || !Array.isArray(level.points)) {
+          return;
+        }
+
+        level.points.forEach((point) => {
+          if (point.distance < minX || point.distance > maxX) {
+            return;
+          }
+
+          minY = Math.min(minY, point.thresholdValue);
+          maxY = Math.max(maxY, point.thresholdValue);
+        });
+      });
+
+      if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+        return [initialStats.yMin, initialStats.yMax];
+      }
+
+      const span = maxY - minY;
+      const padding = span > 0 ? span * 0.12 : Math.max(Math.abs(maxY) * 0.08, 1);
+
+      return [Number((minY - padding).toFixed(3)), Number((maxY + padding).toFixed(3))];
+    },
+    [
+      currentTypeParam,
+      processedData,
+      fileIds,
+      fileVisibility,
+      hideUnselected,
+      initialStats.yMax,
+      initialStats.yMin,
+      thresholdLevels,
+    ]
+  );
+
+  const ensureAudioContext = useCallback(async () => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      return null;
+    }
+
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContextClass();
+    }
+
+    if (audioContextRef.current.state === "suspended") {
+      try {
+        await audioContextRef.current.resume();
+      } catch {
+        return audioContextRef.current;
+      }
+    }
+
+    return audioContextRef.current;
+  }, []);
+
+  const playAlertTone = useCallback(async () => {
+    const context = await ensureAudioContext();
+    if (!context) {
+      return;
+    }
+
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const now = context.currentTime;
+
+    oscillator.type = "sine";
+    oscillator.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.08, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.35);
+  }, [ensureAudioContext]);
+
   const fetchChartData = useCallback(
-    async (type, channelKey) => {
+    async (type, channelKey, selectedRangeMode = RANGE_MODES.default) => {
       const channelInfo = CHANNELS[channelKey] || CHANNELS[DEFAULT_CHANNEL];
-      const range = getRangeForChart(type);
+      const range = getRangeForChart(type, selectedRangeMode);
       setIsReloading(true);
       setDataError(null);
 
       try {
         const param = type === "tension" ? "str" : "tem";
-        const apiBase =
-          import.meta.env.VITE_CH1_API || window.location.origin;
         const response = await fetch(
-          `${apiBase}/api/ch1-data?type=${param}&min=${range.xMin}&max=${range.xMax}&ch=${channelInfo.id}`
+          `${getApiBase()}/api/ch1-data?type=${param}&min=${range.xMin}&max=${range.xMax}&ch=${channelInfo.id}`
         );
         const rawText = await response.text();
 
@@ -354,7 +648,19 @@ const LimitsView = () => {
           );
         }
 
-        const points = Array.isArray(payload.points) ? payload.points : [];
+        const rawPoints = Array.isArray(payload.points) ? payload.points : [];
+        const valueDivisor =
+          Number(channelInfo.valueDivisor) > 0 ? channelInfo.valueDivisor : 1;
+        const points =
+          valueDivisor === 1
+            ? rawPoints
+            : rawPoints.map((point) => ({
+                ...point,
+                temperature:
+                  point.temperature == null
+                    ? null
+                    : Number((point.temperature / valueDivisor).toFixed(6)),
+              }));
         const latest = payload.latestFile || null;
 
         applyChartRange(range);
@@ -362,13 +668,16 @@ const LimitsView = () => {
         setLatestFileId(latest);
 
         const newIds = new Set();
-        points.forEach((p) => {
-          if (p.fileId) newIds.add(p.fileId);
+        points.forEach((point) => {
+          if (point.fileId) {
+            newIds.add(point.fileId);
+          }
         });
-        setFileVisibility((prev) => {
+
+        setFileVisibility((previous) => {
           const next = {};
           Array.from(newIds).forEach((id) => {
-            next[id] = prev[id] !== undefined ? prev[id] : true;
+            next[id] = previous[id] !== undefined ? previous[id] : true;
           });
           return next;
         });
@@ -384,366 +693,378 @@ const LimitsView = () => {
         setIsReloading(false);
       }
     },
-    [applyChartRange, getRangeForChart]
+    [applyChartRange, getApiBase, getRangeForChart]
   );
 
   useEffect(() => {
-    void fetchChartData(chartType, channel);
-  }, [chartType, channel, fetchChartData]);
-
-  const handleReloadData = () => {
-    void fetchChartData(chartType, channel);
-  };
-
-  // Auto-recarga cada 4 minutos para buscar nuevos TXT del canal actual
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (!isReloadingRef.current) {
-        void fetchChartData(chartType, channel);
-      }
-    }, 60 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, [chartType, channel, fetchChartData]);
+    void fetchChartData(chartType, channel, rangeMode);
+  }, [chartType, channel, fetchChartData, rangeMode]);
 
   useEffect(() => {
     isReloadingRef.current = isReloading;
   }, [isReloading]);
 
+  useEffect(() => {
+    latestFileRef.current = latestFileId;
+  }, [latestFileId]);
+
+  useEffect(() => {
+    soundPanelOpenRef.current = soundPanelOpen;
+  }, [soundPanelOpen]);
+
+  useEffect(() => {
+    soundMutedRef.current = soundMuted;
+  }, [soundMuted]);
+
+  useEffect(() => {
+    const isFullRange =
+      Math.abs(xDomain[0] - initialStats.xMin) < 0.000001 &&
+      Math.abs(xDomain[1] - initialStats.xMax) < 0.000001;
+
+    const nextDomain = isFullRange
+      ? [initialStats.yMin, initialStats.yMax]
+      : computeYDomainForRange(xDomain);
+
+    setYDomain((previous) =>
+      domainsAreEqual(previous, nextDomain) ? previous : nextDomain
+    );
+  }, [computeYDomainForRange, initialStats.xMax, initialStats.xMin, initialStats.yMax, initialStats.yMin, xDomain]);
+
+  useEffect(() => {
+    const syncThresholds = async () => {
+      try {
+        await fetch(`${getApiBase()}/api/thresholds`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            thresholds: syncPayload,
+          }),
+        });
+      } catch (error) {
+        console.error("Error sincronizando umbrales", error);
+      }
+    };
+
+    void syncThresholds();
+  }, [getApiBase, syncPayload]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(
+        THRESHOLD_CACHE_KEY,
+        JSON.stringify(syncPayload)
+      );
+    } catch (error) {
+      console.error("Error guardando cache de umbrales", error);
+    }
+  }, [syncPayload]);
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    const pollMonitor = async () => {
+      try {
+        const response = await fetch(`${getApiBase()}/api/monitor-state`, {
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        if (isDisposed) {
+          return;
+        }
+
+        const nextAlerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+        setAlerts(nextAlerts);
+
+        const newAlerts = nextAlerts.filter(
+          (alert) => !seenAlertIdsRef.current.has(alert.id)
+        );
+        newAlerts.forEach((alert) => {
+          seenAlertIdsRef.current.add(alert.id);
+        });
+
+        if (
+          newAlerts.some((alert) => alert.soundEnabled) &&
+          soundPanelOpenRef.current &&
+          !soundMutedRef.current
+        ) {
+          void playAlertTone();
+        }
+
+        const monitorChannelId =
+          CHANNELS[channel]?.id || CHANNELS[DEFAULT_CHANNEL].id;
+        const currentKey = `${monitorChannelId}:${currentTypeParam}`;
+        const nextLatestFile = payload?.versions?.[currentKey]?.latestFile || null;
+        if (
+          nextLatestFile &&
+          nextLatestFile !== latestFileRef.current &&
+          !isReloadingRef.current
+        ) {
+          latestFileRef.current = nextLatestFile;
+          void fetchChartData(chartType, channel, rangeMode);
+        }
+      } catch (error) {
+        console.error("Error leyendo monitor", error);
+      }
+    };
+
+    void pollMonitor();
+    const interval = setInterval(() => {
+      void pollMonitor();
+    }, MONITOR_POLL_MS);
+
+    return () => {
+      isDisposed = true;
+      clearInterval(interval);
+    };
+  }, [
+    channel,
+    chartType,
+    currentTypeParam,
+    fetchChartData,
+    getApiBase,
+    playAlertTone,
+    rangeMode,
+  ]);
+
+  const handleReloadData = () => {
+    void fetchChartData(chartType, channel, rangeMode);
+  };
+
+  const handleChartTypeChange = (type) => {
+    setChartType(type);
+  };
+
+  const handleChannelChange = (event) => {
+    setChannel(event.target.value);
+  };
+
+  const handleRangeModeChange = (event) => {
+    const value = event.target.value;
+    if (value === RANGE_MODES.default || value === RANGE_MODES.full) {
+      setRangeMode(value);
+    }
+  };
+
+  const handleNoiseModeChange = (event) => {
+    const value = event.target.value;
+    if (value === NOISE_MODES.raw || value === NOISE_MODES.std) {
+      setNoiseMode(value);
+    }
+  };
+
   const toggleFileVisibility = (fileId) => {
-    setFileVisibility((prev) => ({
-      ...prev,
-      [fileId]: prev[fileId] === false ? true : false,
+    setFileVisibility((previous) => ({
+      ...previous,
+      [fileId]: previous[fileId] === false ? true : false,
     }));
   };
 
-  // --- Carga de archivos de límites ---
-  const handleLimitsUpload = (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const handleAddThreshold = () => {
+    const parsed = Number(thresholdInput);
+    const sourceFileId = activeReferenceFileId;
+    if (!Number.isFinite(parsed) || parsed <= 0 || !sourceFileId) {
+      return;
+    }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target.result;
-      const thresholdRegex = /<threshold>([\s\S]*?)<\/threshold>/g;
-      const matches = [...text.matchAll(thresholdRegex)];
+    const referencePoints = processedData
+      .filter(
+        (point) =>
+          point.fileId === sourceFileId &&
+          point.temperature != null &&
+          !Number.isNaN(point.temperature)
+      )
+      .map((point) => ({
+        distance: point.distance,
+        thresholdValue: getThresholdValue(point.temperature, parsed),
+      }))
+      .filter((point) => Number.isFinite(point.thresholdValue));
 
-      const newLimits = [];
-      let maxIdFound = 0;
+    if (referencePoints.length === 0) {
+      return;
+    }
 
-      for (const match of matches) {
-        const content = match[1];
-        const getTagValue = (tag) => {
-          const regex = new RegExp(`<${tag}>(.*?)<\/${tag}>`);
-          const result = content.match(regex);
-          return result ? result[1] : null;
-        };
+    const normalizedPercent = Number(parsed.toFixed(1));
+    const alreadyExists = thresholdLevels.some(
+      (level) =>
+        level.percent === normalizedPercent &&
+        level.sourceFileId === sourceFileId &&
+        level.type === currentTypeParam
+    );
+    if (alreadyExists) {
+      return;
+    }
 
-        const idStr = getTagValue("id");
-        const startStr = getTagValue("pos_start");
-        const endStr = getTagValue("pos_stop");
-        const valStr = getTagValue("value");
-        const tolStr = getTagValue("tolerance");
-        const typeStr = getTagValue("type");
+    const uniqueKey = `${Date.now()}_${thresholdLevels.length}`;
+    const nextPaletteColor =
+      THRESHOLD_COLORS[(thresholdLevels.length + 1) % THRESHOLD_COLORS.length];
 
-        if (idStr && startStr && endStr && valStr) {
-          const customId = parseInt(idStr, 10);
-          if (customId > maxIdFound) maxIdFound = customId;
+    setThresholdLevels((previous) => [
+      ...previous,
+      {
+        id: uniqueKey,
+        percent: normalizedPercent,
+        floor: Number(getThresholdFloor(normalizedPercent).toFixed(2)),
+        color: thresholdColor,
+        sourceFileId,
+        sourceFileIndex: activeReferenceIndex,
+        soundEnabled: thresholdSoundEnabled,
+        type: currentTypeParam,
+        thresholdLabel: `Umbral al ${normalizedPercent.toFixed(1)}%`,
+        points: referencePoints,
+      },
+    ]);
 
-          newLimits.push({
-            id: Date.now() + Math.random(),
-            customId,
-            start: parseFloat(startStr),
-            end: parseFloat(endStr),
-            threshold: parseFloat(valStr),
-            tolerance: tolStr ? parseInt(tolStr, 10) : 5,
-            type: typeStr ? parseInt(typeStr, 10) : 3,
-          });
-        }
-      }
-
-      if (newLimits.length > 0) {
-        setLimits(newLimits);
-        if (maxIdFound >= nextId) setNextId(maxIdFound + 1);
-      } else {
-        alert("No se encontraron límites válidos.");
-      }
-    };
-    reader.readAsText(file);
-    event.target.value = "";
+    setThresholdColor(nextPaletteColor);
+    if (thresholdSoundEnabled) {
+      void ensureAudioContext();
+    }
   };
 
-  // --- Coordenadas del gráfico ---
-  const getChartCoordinates = useCallback(
-    (e) => {
+  const handleRemoveThreshold = (id) => {
+    setThresholdLevels((previous) =>
+      previous.filter((level) => level.id !== id)
+    );
+  };
+
+  const handleThresholdInputKeyDown = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      handleAddThreshold();
+    }
+  };
+
+  const getChartXValue = useCallback(
+    (event) => {
       const rect =
         chartRectRef.current ||
         (chartContainerRef.current &&
           chartContainerRef.current.getBoundingClientRect());
 
-      if (!rect) return null;
+      if (!rect) {
+        return null;
+      }
 
       const gridLeft = CHART_MARGINS.left + Y_AXIS_WIDTH;
-      const gridTop = CHART_MARGINS.top;
       const gridWidth =
         rect.width - CHART_MARGINS.left - CHART_MARGINS.right - Y_AXIS_WIDTH;
-      const gridHeight =
-        rect.height -
-        CHART_MARGINS.top -
-        CHART_MARGINS.bottom -
-        X_AXIS_HEIGHT;
-
-      const xPixel = e.clientX - rect.left - gridLeft;
-      const yPixel = e.clientY - rect.top - gridTop - Y_POINTER_OFFSET;
-
+      const xPixel = event.clientX - rect.left - gridLeft;
       const [currentXMin, currentXMax] = xDomain;
-      const [currentYMin, currentYMax] = yDomain;
 
       let xValue =
         currentXMin + (xPixel / gridWidth) * (currentXMax - currentXMin);
-      let yValue =
-        currentYMax - (yPixel / gridHeight) * (currentYMax - currentYMin);
-
       xValue = Math.max(currentXMin, Math.min(currentXMax, xValue));
-      yValue = Math.max(currentYMin, Math.min(currentYMax, yValue));
 
-      // Menos precisión = menos updates distintos
-      const xRounded = Math.round(xValue); // 1 m
-      const yRounded = Math.round(yValue * 10) / 10; // 0.1 uE
-
-      return {
-        x: xRounded,
-        y: yRounded,
-      };
+      return Math.round(xValue);
     },
-    [xDomain, yDomain]
+    [xDomain]
   );
 
-  // --- Mouse handlers ---
-  const handleMouseDown = (e) => {
-    e.preventDefault();
+  const handleMouseDown = (event) => {
+    event.preventDefault();
 
     if (chartContainerRef.current) {
-      chartRectRef.current =
-        chartContainerRef.current.getBoundingClientRect();
+      chartRectRef.current = chartContainerRef.current.getBoundingClientRect();
     }
 
-    const coords = getChartCoordinates(e);
-    if (!coords) return;
+    const xValue = getChartXValue(event);
+    if (xValue == null) {
+      return;
+    }
 
-    lastDrawCoordsRef.current = coords;
-
-    setDrawingState({
-      isDrawing: true,
-      startX: coords.x,
-      startY: coords.y,
-      endX: coords.x,
-      endY: coords.y,
+    lastPointerXRef.current = xValue;
+    setZoomSelection({
+      isSelecting: true,
+      startX: xValue,
+      endX: xValue,
     });
   };
 
-
-  const handleMouseMove = (e) => {
-    if (!drawingState.isDrawing) return;
-    if (rafRef.current) return;
+  const handleMouseMove = (event) => {
+    if (!zoomSelection.isSelecting || rafRef.current) {
+      return;
+    }
 
     rafRef.current = requestAnimationFrame(() => {
-      const coords = getChartCoordinates(e);
-      if (coords) {
-        const last = lastDrawCoordsRef.current;
-        const dx = last ? Math.abs(coords.x - last.x) : Infinity;
-        const dy = last ? Math.abs(coords.y - last.y) : Infinity;
+      const xValue = getChartXValue(event);
+      if (xValue != null) {
+        const lastPointerX = lastPointerXRef.current;
+        const delta =
+          lastPointerX != null ? Math.abs(xValue - lastPointerX) : Infinity;
 
-        // 👇 Umbrales mínimos de movimiento para disparar re-render
-        const MIN_DX = 1.0; // metros
-        const MIN_DY = 1.0; // unidades de valor
-
-        if (dx >= MIN_DX || dy >= MIN_DY) {
-          lastDrawCoordsRef.current = coords;
-
-          setDrawingState((prev) => ({
-            ...prev,
-            endX: coords.x,
-            endY: mode === "draw" ? prev.startY : coords.y,
+        if (delta >= MIN_POINTER_DELTA_X) {
+          lastPointerXRef.current = xValue;
+          setZoomSelection((previous) => ({
+            ...previous,
+            endX: xValue,
           }));
         }
       }
+
       rafRef.current = null;
     });
   };
 
-    const handleMouseUp = () => {
-    if (!drawingState.isDrawing) return;
+  const handleMouseUp = () => {
+    if (!zoomSelection.isSelecting) {
+      return;
+    }
 
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
 
-    // 👇 limpiar cache
     chartRectRef.current = null;
-    lastDrawCoordsRef.current = null;
+    lastPointerXRef.current = null;
 
-    const { startX, endX, startY, endY } = drawingState;
+    const { startX, endX } = zoomSelection;
+    const nextSelection = {
+      isSelecting: false,
+      startX: null,
+      endX: null,
+    };
 
-    if (mode === "zoom") {
-      const xDiff = Math.abs(endX - startX);
-      const yDiff = Math.abs(endY - startY);
-
-      if (
-        xDiff > (initialStats.xMax - initialStats.xMin) * 0.005 ||
-        yDiff > (initialStats.yMax - initialStats.yMin) * 0.005
-      ) {
-        const x1 = Math.min(startX, endX);
-        const x2 = Math.max(startX, endX);
-        const y1 = Math.min(startY, endY);
-        const y2 = Math.max(startY, endY);
-
-        setXDomain([x1, x2]);
-        setYDomain([y1, y2]);
-      }
-      setDrawingState((prev) => ({ ...prev, isDrawing: false }));
+    if (startX == null || endX == null) {
+      setZoomSelection(nextSelection);
       return;
     }
 
-    if (mode === "draw") {
-      const xMin = Math.min(startX, endX);
-      const xMax = Math.max(startX, endX);
-      const threshold = startY;
-
-      setDrawingState((prev) => ({ ...prev, isDrawing: false }));
-
-      if (Math.abs(xMax - xMin) > 0) {
-        setCurrentLimitForm((prev) => ({
-          ...prev,
-          start: xMin,
-          end: xMax,
-          threshold: threshold,
-        }));
-        setEditingId(null);
-      }
+    if (
+      Math.abs(endX - startX) >
+      (initialStats.xMax - initialStats.xMin) * MIN_ZOOM_RATIO
+    ) {
+      setXDomain([Math.min(startX, endX), Math.max(startX, endX)]);
     }
+
+    setZoomSelection(nextSelection);
   };
 
   const resetZoom = () => {
     setXDomain([initialStats.xMin, initialStats.xMax]);
     setYDomain([initialStats.yMin, initialStats.yMax]);
-  };
-
-  const handleChartTypeChange = (type) => {
-    setChartType(type);
-  };
-  const handleChannelChange = (event) => {
-    const value = event.target.value;
-    setChannel(value);
-  };
-
-  // --- Límites ---
-  const handleSaveOrUpdateLimit = () => {
-    if (editingId) {
-      setLimits((prev) =>
-        prev.map((l) =>
-          l.id === editingId ? { ...l, ...currentLimitForm } : l
-        )
-      );
-      setEditingId(null);
-    } else {
-      const newLimit = {
-        id: Date.now(),
-        customId: nextId,
-        ...currentLimitForm,
-      };
-      setLimits((prev) => [...prev, newLimit]);
-      setNextId((prev) => prev + 1);
-    }
-
-    setDrawingState({
-      isDrawing: false,
+    setZoomSelection({
+      isSelecting: false,
       startX: null,
-      startY: null,
       endX: null,
-      endY: null,
     });
-    setCurrentLimitForm({
-      start: 0,
-      end: 0,
-      threshold: 0,
-      tolerance: 5,
-      type: 3,
-    });
-  };
-
-  const handleEditLimit = (limit) => {
-    setCurrentLimitForm({
-      start: limit.start,
-      end: limit.end,
-      threshold: limit.threshold,
-      tolerance: limit.tolerance,
-      type: limit.type,
-    });
-    setEditingId(limit.id);
-  };
-
-  const handleDeleteLimit = (id) => {
-    setLimits((prev) => prev.filter((l) => l.id !== id));
-    if (editingId === id) {
-      setEditingId(null);
-      setCurrentLimitForm({
-        start: 0,
-        end: 0,
-        threshold: 0,
-        tolerance: 5,
-        type: 3,
-      });
-    }
-  };
-
-  const handleCancelEdit = () => {
-    setEditingId(null);
-    setCurrentLimitForm({
-      start: 0,
-      end: 0,
-      threshold: 0,
-      tolerance: 5,
-      type: 3,
-    });
-  };
-
-  const handleExportLimits = () => {
-    const content = limits
-      .map(
-        (l) => `<threshold>
-<id>${l.customId}</id>
-<type>${l.type}</type>
-<refd>true</refd>
-<pos_start>${l.start.toFixed(2)}</pos_start>
-<pos_stop>${l.end.toFixed(2)}</pos_stop>
-<value>${l.threshold.toFixed(2)}</value>
-<tolerance>${l.tolerance}</tolerance>
-</threshold>`
-      )
-      .join("\n\n");
-
-    const blob = new Blob([content], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "limites_activos.txt";
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-50 text-slate-800 font-sans overflow-y-auto">
       <HeaderBar
         xDomain={xDomain}
-        yDomain={yDomain}
         initialStats={initialStats}
-        mode={mode}
-        onModeChange={setMode}
-        hasData={data.length > 0}
         onResetZoom={resetZoom}
-        onLimitsFileChange={handleLimitsUpload}
-        canLoadLimits={data.length > 0}
         onReloadData={handleReloadData}
         isReloading={isReloading}
       />
@@ -772,6 +1093,7 @@ const LimitsView = () => {
             Grafico Temperatura
           </button>
         </div>
+
         <div className="flex items-center gap-2">
           <span className="text-sm text-slate-600">Canal:</span>
           <select
@@ -779,13 +1101,36 @@ const LimitsView = () => {
             onChange={handleChannelChange}
             className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
           >
-            {Object.values(CHANNELS).map((ch) => (
-              <option key={ch.id} value={ch.id}>
-                {ch.label}
+            {Object.entries(CHANNELS).map(([channelKey, channelOption]) => (
+              <option key={channelKey} value={channelKey}>
+                {channelOption.label}
               </option>
             ))}
           </select>
         </div>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-600">Tramo:</span>
+          <select
+            value={rangeMode}
+            onChange={handleRangeModeChange}
+            className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
+          >
+            <option value={RANGE_MODES.default}>Correspondiente</option>
+            <option value={RANGE_MODES.full}>Completo 0 - 1620</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-600">Ruido:</span>
+          <select
+            value={noiseMode}
+            onChange={handleNoiseModeChange}
+            className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
+          >
+            <option value={NOISE_MODES.raw}>Original</option>
+            <option value={NOISE_MODES.std}>Desviacion estandar (N)</option>
+          </select>
+        </div>
+
         {dataError ? (
           <span className="ml-auto text-sm text-red-600">{dataError}</span>
         ) : (
@@ -798,42 +1143,158 @@ const LimitsView = () => {
       </div>
 
       <div className="flex flex-col flex-1 overflow-y-auto min-h-0">
-        {/* Grafico */}
         <div className="flex-1 p-4 relative min-h-0 bg-slate-100 space-y-3">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            {alertsPanelOpen ? (
+              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-800">
+                      Alertas Detectadas
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      Se actualizan cuando entra un archivo nuevo en cualquier canal
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setAlertsPanelOpen(false)}
+                    className="text-xs text-slate-400 hover:text-slate-700"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+
+                <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+                  {alerts.length === 0 ? (
+                    <div className="text-xs text-slate-400 italic">
+                      Sin alertas activas por ahora
+                    </div>
+                  ) : (
+                    alerts.slice(0, 6).map((alert) => (
+                      <div
+                        key={alert.id}
+                        className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs"
+                      >
+                        <div className="font-semibold text-red-700">
+                          {alert.thresholdLabel}
+                        </div>
+                        <div className="text-slate-500">
+                          Canal {alert.channel} |{" "}
+                          {alert.type === "str" ? "Tension" : "Temperatura"} |{" "}
+                          {formatAlertTime(alert.createdAt)}
+                        </div>
+                        <div className="text-slate-700">
+                          Lectura {Number(alert.measuredValue).toFixed(2)} &gt;{" "}
+                          {Number(alert.thresholdValue).toFixed(2)} en{" "}
+                          {Number(alert.distance).toFixed(2)} m
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setAlertsPanelOpen(true)}
+                className="justify-self-start px-3 py-2 rounded-lg bg-white border border-slate-200 text-sm text-slate-700 shadow-sm"
+              >
+                Mostrar alertas
+              </button>
+            )}
+
+            {soundPanelOpen ? (
+              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-800">
+                      Sonido de Alertas
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      Umbrales con sonido: {soundThresholdCount}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setSoundPanelOpen(false);
+                      setSoundMuted(true);
+                    }}
+                    className="text-xs text-slate-400 hover:text-slate-700"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`text-xs px-3 py-1 rounded-full ${
+                      soundMuted
+                        ? "bg-slate-100 text-slate-500"
+                        : "bg-emerald-50 text-emerald-700"
+                    }`}
+                  >
+                    {soundMuted ? "Silenciado" : "Activo"}
+                  </span>
+                  <button
+                    onClick={() => setSoundMuted((previous) => !previous)}
+                    className="px-3 py-2 rounded-md bg-slate-800 text-white text-xs"
+                  >
+                    {soundMuted ? "Reactivar sonido" : "Silenciar sonido"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setSoundPanelOpen(true);
+                  setSoundMuted(false);
+                }}
+                className="justify-self-start px-3 py-2 rounded-lg bg-white border border-slate-200 text-sm text-slate-700 shadow-sm"
+              >
+                Mostrar sonido
+              </button>
+            )}
+          </div>
+
           {fileIds.length > 0 && (
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex flex-wrap gap-2">
-                {fileIds.map((fid, idx) => {
-                  const isOn = fileVisibility[fid] !== false;
+                {fileIds.map((fileId, index) => {
+                  const isOn = fileVisibility[fileId] !== false;
+                  const isReference = fileId === activeReferenceFileId;
+
                   return (
                     <button
-                      key={fid}
-                      onClick={() => toggleFileVisibility(fid)}
+                      key={fileId}
+                      onClick={() => toggleFileVisibility(fileId)}
                       className={`text-xs px-3 py-1 rounded-full border transition-colors ${
                         isOn
-                          ? "bg-blue-50 border-blue-200 text-blue-700"
+                          ? isReference
+                            ? "bg-red-50 border-red-200 text-red-700"
+                            : "bg-blue-50 border-blue-200 text-blue-700"
                           : "bg-slate-100 border-slate-200 text-slate-400"
                       }`}
-                      title={fid}
+                      title={fileId}
                     >
-                      Archivo {idx + 1}
+                      Archivo {index + 1}
                     </button>
                   );
                 })}
               </div>
+
               <label className="flex items-center gap-2 text-xs text-slate-600">
                 <input
                   type="checkbox"
                   className="accent-blue-600"
                   checked={hideUnselected}
-                  onChange={(e) => setHideUnselected(e.target.checked)}
+                  onChange={(event) => setHideUnselected(event.target.checked)}
                 />
                 Ocultar no seleccionados
               </label>
             </div>
           )}
+
           <LimitsChart
-            data={data}
+            hasData={data.length > 0}
             visibleData={chartData}
             lineColor={CHANNELS[channel]?.color || CHANNELS[DEFAULT_CHANNEL].color}
             chartType={chartType}
@@ -841,8 +1302,10 @@ const LimitsView = () => {
             fileIds={fileIds}
             fileVisibility={fileVisibility}
             hideUnselected={hideUnselected}
-            mode={mode}
-            drawingState={drawingState}
+            thresholdSeries={visibleThresholdSeries}
+            activeReferenceFileId={activeReferenceFileId}
+            activeReferenceIndex={activeReferenceIndex}
+            zoomSelection={zoomSelection}
             xDomain={xDomain}
             yDomain={yDomain}
             initialStats={initialStats}
@@ -850,26 +1313,22 @@ const LimitsView = () => {
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
-            limits={filteredLimits}
-            editingId={editingId}
           />
         </div>
 
-        {/* Panel de control */}
         <ControlPanel
-          nextId={nextId}
-          setNextId={setNextId}
-          drawingState={drawingState}
-          mode={mode}
-          currentLimitForm={currentLimitForm}
-          setCurrentLimitForm={setCurrentLimitForm}
-          editingId={editingId}
-          onCancelEdit={handleCancelEdit}
-          onSaveOrUpdateLimit={handleSaveOrUpdateLimit}
-          limits={filteredLimits}
-          onEditLimit={handleEditLimit}
-          onDeleteLimit={handleDeleteLimit}
-          onExportLimits={handleExportLimits}
+          thresholdInput={thresholdInput}
+          onThresholdInputChange={setThresholdInput}
+          thresholdColor={thresholdColor}
+          onThresholdColorChange={setThresholdColor}
+          thresholdSoundEnabled={thresholdSoundEnabled}
+          onThresholdSoundEnabledChange={setThresholdSoundEnabled}
+          onThresholdInputKeyDown={handleThresholdInputKeyDown}
+          onAddThreshold={handleAddThreshold}
+          thresholdLevels={sortedThresholdLevels}
+          onRemoveThreshold={handleRemoveThreshold}
+          activeReferenceIndex={activeReferenceIndex}
+          selectedFileCount={activeFileIds.length}
         />
       </div>
     </div>
