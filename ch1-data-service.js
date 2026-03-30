@@ -157,6 +157,179 @@ const selectRecentFiles = (files, typeParam, now = new Date()) => {
   };
 };
 
+const buildComparisonMetadata = (selectedFiles) => {
+  const latestFile =
+    selectedFiles.length > 0 ? selectedFiles[selectedFiles.length - 1] : null;
+  const previousFile =
+    selectedFiles.length > 1 ? selectedFiles[selectedFiles.length - 2] : null;
+
+  return {
+    latestFile,
+    previousFile,
+    selectedFiles,
+  };
+};
+
+const buildDifferentialRows = ({
+  previousFile,
+  previousPoints,
+  latestFile,
+  latestPoints,
+}) => {
+  if (!previousFile || !latestFile) {
+    return [];
+  }
+
+  const previousByDistance = new Map();
+  previousPoints.forEach((point) => {
+    if (
+      Number.isFinite(point?.distance) &&
+      Number.isFinite(point?.temperature) &&
+      !previousByDistance.has(normalizeDistanceKey(point.distance))
+    ) {
+      previousByDistance.set(normalizeDistanceKey(point.distance), point.temperature);
+    }
+  });
+
+  return latestPoints
+    .map((point) => {
+      if (!Number.isFinite(point?.distance) || !Number.isFinite(point?.temperature)) {
+        return null;
+      }
+
+      const previousValue = previousByDistance.get(
+        normalizeDistanceKey(point.distance)
+      );
+      if (!Number.isFinite(previousValue)) {
+        return null;
+      }
+
+      const latestValue = Number(point.temperature.toFixed(6));
+      const normalizedPreviousValue = Number(previousValue.toFixed(6));
+      const differential = Number((latestValue - normalizedPreviousValue).toFixed(6));
+
+      return {
+        distance: Number(point.distance.toFixed(6)),
+        previousValue: normalizedPreviousValue,
+        latestValue,
+        differential,
+        previousFile,
+        latestFile,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.distance - b.distance);
+};
+
+const buildNormalPayload = async ({ dataDir, selectedFiles, range }) => {
+  let combined = [];
+
+  for (let index = 0; index < selectedFiles.length; index += 1) {
+    const filename = selectedFiles[index];
+    const fullPath = path.join(dataDir, filename);
+    const filePoints = await parseFilePoints(fullPath, range);
+
+    if (filePoints.length === 0) {
+      continue;
+    }
+
+    const tagged = filePoints.map((point) => ({ ...point, fileId: filename }));
+    combined = combined.concat(tagged);
+
+    if (index < selectedFiles.length - 1) {
+      combined.push({
+        distance: filePoints[filePoints.length - 1].distance,
+        temperature: null,
+        fileId: filename,
+      });
+    }
+  }
+
+  const comparison = buildComparisonMetadata(selectedFiles);
+  return {
+    mode: "compare",
+    points: combined,
+    latestFile: comparison.latestFile,
+    previousFile: comparison.previousFile,
+    selectedFiles: comparison.selectedFiles,
+  };
+};
+
+const buildDifferentialPayload = async ({
+  dataDir,
+  selectedFiles,
+  range,
+  mode = "diff2",
+  firstFile = null,
+  secondFile = null,
+}) => {
+  const comparison = buildComparisonMetadata(selectedFiles);
+  const resolvedFirstFile =
+    typeof firstFile === "string" && selectedFiles.includes(firstFile)
+      ? firstFile
+      : comparison.previousFile;
+  const resolvedSecondFile =
+    typeof secondFile === "string" && selectedFiles.includes(secondFile)
+      ? secondFile
+      : comparison.latestFile;
+
+  if (!resolvedFirstFile || !resolvedSecondFile) {
+    return {
+      mode,
+      points: [],
+      latestFile: resolvedSecondFile,
+      previousFile: resolvedFirstFile,
+      selectedFiles: comparison.selectedFiles,
+      exportRows: [],
+      differentialReady: false,
+      message:
+        mode === "manual_diff"
+          ? "Se necesitan al menos 2 lecturas para calcular el diferencial manual."
+          : "Se necesitan al menos 2 lecturas para calcular el diferencial.",
+    };
+  }
+
+  const previousPoints = await parseFilePoints(
+    path.join(dataDir, resolvedFirstFile),
+    range
+  );
+  const latestPoints = await parseFilePoints(
+    path.join(dataDir, resolvedSecondFile),
+    range
+  );
+
+  const exportRows = buildDifferentialRows({
+    previousFile: resolvedFirstFile,
+    previousPoints,
+    latestFile: resolvedSecondFile,
+    latestPoints,
+  });
+
+  return {
+    mode,
+    points: exportRows.map((row) => ({
+      distance: row.distance,
+      temperature: row.differential,
+      fileId: `${row.previousFile}__${row.latestFile}`,
+      previousValue: row.previousValue,
+      latestValue: row.latestValue,
+      previousFile: row.previousFile,
+      latestFile: row.latestFile,
+    })),
+    latestFile: resolvedSecondFile,
+    previousFile: resolvedFirstFile,
+    selectedFiles: comparison.selectedFiles,
+    exportRows,
+    differentialReady: exportRows.length > 0,
+    message:
+      exportRows.length > 0
+        ? null
+        : mode === "manual_diff"
+          ? "No se encontraron puntos coincidentes entre las lecturas seleccionadas dentro del tramo elegido."
+          : "No se encontraron puntos coincidentes entre las 2 ultimas lecturas dentro del tramo seleccionado.",
+  };
+};
+
 const sendTelegramAlert = async (message) => {
   if (typeof fetch !== "function") {
     return;
@@ -434,6 +607,9 @@ export const readChannelData = async ({
   channel,
   type,
   range,
+  mode = "compare",
+  file1 = null,
+  file2 = null,
   now = new Date(),
   logger = null,
 }) => {
@@ -464,30 +640,30 @@ export const readChannelData = async ({
     });
   }
 
-  let combined = [];
-  for (let index = 0; index < selected.length; index += 1) {
-    const filename = selected[index];
-    const fullPath = path.join(dataDir, filename);
-    const filePoints = await parseFilePoints(fullPath, range);
-
-    if (filePoints.length === 0) {
-      continue;
-    }
-
-    const tagged = filePoints.map((point) => ({ ...point, fileId: filename }));
-    combined = combined.concat(tagged);
-
-    if (index < selected.length - 1) {
-      combined.push({
-        distance: filePoints[filePoints.length - 1].distance,
-        temperature: null,
-        fileId: filename,
-      });
-    }
+  if (mode === "diff2") {
+    return buildDifferentialPayload({
+      dataDir,
+      selectedFiles: selected,
+      range,
+    });
   }
 
-  const latestFile = selected.length > 0 ? selected[selected.length - 1] : null;
-  return { points: combined, latestFile };
+  if (mode === "manual_diff") {
+    return buildDifferentialPayload({
+      dataDir,
+      selectedFiles: selected,
+      range,
+      mode,
+      firstFile: file1,
+      secondFile: file2,
+    });
+  }
+
+  return buildNormalPayload({
+    dataDir,
+    selectedFiles: selected,
+    range,
+  });
 };
 
 export const handleApiRequest = async ({
@@ -535,6 +711,15 @@ export const handleApiRequest = async ({
     const hasRange = !Number.isNaN(min) && !Number.isNaN(max);
     const range = hasRange ? { min, max } : undefined;
     const channelParam = url.searchParams.get("ch") || "1";
+    const viewModeParam = url.searchParams.get("mode");
+    const mode =
+      viewModeParam === "manual_diff"
+        ? "manual_diff"
+        : viewModeParam === "diff2"
+          ? "diff2"
+          : "compare";
+    const file1Param = url.searchParams.get("file1");
+    const file2Param = url.searchParams.get("file2");
 
     try {
       const payload = await readChannelData({
@@ -542,6 +727,9 @@ export const handleApiRequest = async ({
         channel: channelParam,
         type: typeParam,
         range,
+        mode,
+        file1: file1Param,
+        file2: file2Param,
         logger,
       });
 

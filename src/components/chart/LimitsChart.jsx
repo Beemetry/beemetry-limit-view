@@ -23,6 +23,7 @@ const LimitsChart = ({
   visibleData,
   lineColor = "#3b82f6",
   chartType,
+  viewMode,
   latestFileId,
   fileIds = [],
   fileVisibility = {},
@@ -30,17 +31,30 @@ const LimitsChart = ({
   thresholdSeries = [],
   activeReferenceFileId,
   activeReferenceIndex,
+  comparisonInfo,
   zoomSelection,
   xDomain,
   yDomain,
-  initialStats,
   chartContainerRef,
   onMouseDown,
   onMouseMove,
   onMouseUp,
 }) => {
   const isTemperatureChart = chartType === "temperatura";
-  const yLabel = isTemperatureChart ? "Temperatura C°" : "Tension (uE)";
+  const isDifferentialView = viewMode === "diff2";
+  const isManualDifferentialView = viewMode === "manual_diff";
+  const isAnyDifferentialView = isDifferentialView || isManualDifferentialView;
+  const yLabel = isDifferentialView
+    ? isTemperatureChart
+      ? "Diferencial Temperatura (C)"
+      : "Diferencial Tension (uE)"
+    : isManualDifferentialView
+      ? isTemperatureChart
+        ? "Diferencial Manual Temperatura (C)"
+        : "Diferencial Manual Tension (uE)"
+      : isTemperatureChart
+      ? "Temperatura (C)"
+      : "Tension (uE)";
 
   const groupedByFile = React.useMemo(() => {
     const map = {};
@@ -91,20 +105,63 @@ const LimitsChart = ({
         isTemperatureChart && Number.isFinite(xValue)
           ? RETURN_REFERENCE_DISTANCE - xValue
           : null;
+      const latestValue = Number(point.latestValue);
+      const previousValue = Number(point.previousValue);
+      const resultLabel = isManualDifferentialView
+        ? "Resultado (Lectura 2 - Lectura 1)"
+        : "Resultado (ultima - penultima)";
+      const firstReadingLabel = isManualDifferentialView
+        ? "Lectura 1"
+        : "Penultima lectura";
+      const secondReadingLabel = isManualDifferentialView
+        ? "Lectura 2"
+        : "Ultima lectura";
+      const firstFileLabel = isManualDifferentialView
+        ? "Archivo lectura 1"
+        : "Archivo penultimo";
+      const secondFileLabel = isManualDifferentialView
+        ? "Archivo lectura 2"
+        : "Archivo mas reciente";
 
       return (
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-md text-xs space-y-1">
           <div className="font-semibold text-slate-700">
-            {activeReferenceIndex ?? "N/A"}
+            {isAnyDifferentialView ? "Diferencial" : activeReferenceIndex ?? "N/A"}
           </div>
           <div className="text-slate-600">
             Distancia aproximada:{" "}
             {Number.isFinite(xValue) ? xValue.toFixed(2) : label} m
           </div>
           <div className="text-slate-800">
-            {isTemperatureChart ? "Temperatura (Y)" : "Tension (Y)"}:{" "}
-            {selected.value}
+            {isAnyDifferentialView
+              ? resultLabel
+              : isTemperatureChart
+                ? "Temperatura (Y)"
+                : "Tension (Y)"}
+            :{" "}
+            {Number.isFinite(Number(selected.value))
+              ? Number(selected.value).toFixed(3)
+              : selected.value}
           </div>
+          {isAnyDifferentialView && (
+            <>
+              <div className="text-slate-700">
+                {secondReadingLabel}:{" "}
+                {Number.isFinite(latestValue) ? latestValue.toFixed(3) : "--"}
+              </div>
+              <div className="text-slate-700">
+                {firstReadingLabel}:{" "}
+                {Number.isFinite(previousValue) ? previousValue.toFixed(3) : "--"}
+              </div>
+              <div className="text-slate-500 break-all">
+                {secondFileLabel}: {point.latestFile || comparisonInfo?.latestFile || "--"}
+              </div>
+              <div className="text-slate-500 break-all">
+                {firstFileLabel}:{" "}
+                {point.previousFile || comparisonInfo?.previousFile || "--"}
+              </div>
+            </>
+          )}
           {inverseDistance != null && (
             <div className="text-slate-600">
               Distancia de retorno: {inverseDistance.toFixed(2)} m
@@ -134,7 +191,16 @@ const LimitsChart = ({
         </div>
       );
     },
-    [activeReferenceIndex, isTemperatureChart, tooltipFileId]
+    [
+      activeReferenceIndex,
+      comparisonInfo?.latestFile,
+      comparisonInfo?.previousFile,
+      isDifferentialView,
+      isAnyDifferentialView,
+      isManualDifferentialView,
+      isTemperatureChart,
+      tooltipFileId,
+    ]
   );
 
   return (
@@ -221,7 +287,11 @@ const LimitsChart = ({
                   }
 
                   const isActive = tooltipFileId && fid === tooltipFileId;
-                  const stroke = isActive ? "#ef4444" : lineColor;
+                  const stroke = isAnyDifferentialView
+                    ? "#0f766e"
+                    : isActive
+                      ? "#ef4444"
+                      : lineColor;
                   const strokeOpacity = isVisible ? 1 : 0.25;
                   const showActiveDot = tooltipFileId === fid || tooltipFileId == null;
 
@@ -232,7 +302,7 @@ const LimitsChart = ({
                       data={series}
                       dataKey="temperature"
                       stroke={stroke}
-                      strokeWidth={isActive ? 2.25 : 1.9}
+                      strokeWidth={isAnyDifferentialView ? 2.25 : isActive ? 2.25 : 1.9}
                       strokeOpacity={strokeOpacity}
                       dot={false}
                       activeDot={

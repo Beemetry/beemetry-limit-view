@@ -29,8 +29,14 @@ const CHART_TYPES = {
   },
 };
 const RANGE_MODES = {
-  default: "correspondiente",
+  section1: "tramo_1",
+  section2: "tramo_2",
   full: "completo",
+};
+const VIEW_MODES = {
+  compare: "compare",
+  diff2: "diff2",
+  manualDiff: "manual_diff",
 };
 const NOISE_MODES = {
   raw: "raw",
@@ -40,8 +46,17 @@ const FULL_X_RANGE = {
   xMin: 0,
   xMax: 1620,
 };
+const SECTION_1_X_RANGE = {
+  xMin: 0,
+  xMax: 810,
+};
+const SECTION_2_X_RANGE = {
+  xMin: 810,
+  xMax: 1620,
+};
 
 const DEFAULT_CHART_TYPE = "tension";
+const DEFAULT_RANGE_MODE = RANGE_MODES.section1;
 const DEFAULT_RANGE = CHART_TYPES[DEFAULT_CHART_TYPE];
 const DEFAULT_CHANNEL = "1";
 const CHANNELS = {
@@ -71,6 +86,15 @@ const MIN_POINTER_DELTA_X = 1;
 const MIN_ZOOM_RATIO = 0.005;
 const MONITOR_POLL_MS = 2000;
 const THRESHOLD_CACHE_KEY = "beemetry-thresholds-cache";
+const EMPTY_COMPARISON_INFO = {
+  mode: VIEW_MODES.compare,
+  latestFile: null,
+  previousFile: null,
+  selectedFiles: [],
+  exportRows: [],
+  differentialReady: false,
+  message: null,
+};
 
 const lttbSegment = (segment, threshold) => {
   const dataLength = segment.length;
@@ -225,6 +249,141 @@ const formatAlertTime = (isoValue) => {
   return date.toLocaleTimeString();
 };
 
+const getYBoundsFromPoints = (points, fallbackRange) => {
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  points.forEach((point) => {
+    if (point.temperature == null || Number.isNaN(point.temperature)) {
+      return;
+    }
+
+    minY = Math.min(minY, point.temperature);
+    maxY = Math.max(maxY, point.temperature);
+  });
+
+  if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+    return {
+      yMin: fallbackRange.yMin,
+      yMax: fallbackRange.yMax,
+    };
+  }
+
+  const span = maxY - minY;
+  const padding = span > 0 ? span * 0.12 : Math.max(Math.abs(maxY) * 0.08, 1);
+
+  return {
+    yMin: Number((minY - padding).toFixed(3)),
+    yMax: Number((maxY + padding).toFixed(3)),
+  };
+};
+
+const escapeExcelXml = (value) =>
+  String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+
+const buildExcelCell = (value, type = "String", styleId = "") => {
+  const styleAttr = styleId ? ` ss:StyleID="${styleId}"` : "";
+  return `<Cell${styleAttr}><Data ss:Type="${type}">${escapeExcelXml(
+    value
+  )}</Data></Cell>`;
+};
+
+const buildDifferentialWorkbookXml = ({
+  channelLabel,
+  chartLabel,
+  secondFile,
+  firstFile,
+  secondLabel,
+  firstLabel,
+  rows,
+}) => {
+  const headerRows = [
+    ["Canal", channelLabel],
+    ["Grafico", chartLabel],
+    [`Archivo ${secondLabel}`, secondFile],
+    [`Archivo ${firstLabel}`, firstFile],
+    ["", ""],
+    [
+      "Distancia (m)",
+      `${firstLabel}`,
+      `Archivo ${firstLabel}`,
+      `${secondLabel}`,
+      `Archivo ${secondLabel}`,
+      "Diferencial",
+    ],
+  ];
+
+  const xmlRows = [
+    ...headerRows.map((cells, index) => {
+      const styleId = index === headerRows.length - 1 ? "header" : "meta";
+      return `<Row>${cells
+        .map((cell) => buildExcelCell(cell, "String", styleId))
+        .join("")}</Row>`;
+    }),
+    ...rows.map((row) => {
+      const distance = Number(row.distance);
+      const previousValue = Number(row.previousValue);
+      const latestValue = Number(row.latestValue);
+      const differential = Number(row.differential);
+
+      return `<Row>${[
+        buildExcelCell(
+          Number.isFinite(distance) ? distance.toFixed(6) : row.distance,
+          "Number"
+        ),
+        buildExcelCell(
+          Number.isFinite(previousValue)
+            ? previousValue.toFixed(6)
+            : row.previousValue,
+          "Number"
+        ),
+        buildExcelCell(row.previousFile),
+        buildExcelCell(
+          Number.isFinite(latestValue) ? latestValue.toFixed(6) : row.latestValue,
+          "Number"
+        ),
+        buildExcelCell(row.latestFile),
+        buildExcelCell(
+          Number.isFinite(differential)
+            ? differential.toFixed(6)
+            : row.differential,
+          "Number"
+        ),
+      ].join("")}</Row>`;
+    }),
+  ].join("");
+
+  return `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook
+  xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:x="urn:schemas-microsoft-com:office:excel"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:html="http://www.w3.org/TR/REC-html40"
+>
+  <Styles>
+    <Style ss:ID="meta">
+      <Font ss:Bold="1" />
+    </Style>
+    <Style ss:ID="header">
+      <Font ss:Bold="1" />
+      <Interior ss:Color="#DBEAFE" ss:Pattern="Solid" />
+    </Style>
+  </Styles>
+  <Worksheet ss:Name="Diferencial">
+    <Table>
+      ${xmlRows}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+};
+
 const domainsAreEqual = (a, b) =>
   Math.abs(a[0] - b[0]) < 0.000001 && Math.abs(a[1] - b[1]) < 0.000001;
 
@@ -311,11 +470,15 @@ const loadCachedThresholds = () => {
 
 const LimitsView = () => {
   const [chartType, setChartType] = useState(DEFAULT_CHART_TYPE);
+  const [viewMode, setViewMode] = useState(VIEW_MODES.compare);
   const [channel, setChannel] = useState(DEFAULT_CHANNEL);
-  const [rangeMode, setRangeMode] = useState(RANGE_MODES.default);
+  const [rangeMode, setRangeMode] = useState(DEFAULT_RANGE_MODE);
   const [noiseMode, setNoiseMode] = useState(NOISE_MODES.raw);
   const [data, setData] = useState([]);
   const [latestFileId, setLatestFileId] = useState(null);
+  const [comparisonInfo, setComparisonInfo] = useState(EMPTY_COMPARISON_INFO);
+  const [manualReading1, setManualReading1] = useState("");
+  const [manualReading2, setManualReading2] = useState("");
   const [fileVisibility, setFileVisibility] = useState({});
   const [hideUnselected, setHideUnselected] = useState(false);
   const [thresholdInput, setThresholdInput] = useState(DEFAULT_THRESHOLD_INPUT);
@@ -365,7 +528,7 @@ const LimitsView = () => {
   );
 
   const getRangeForChart = useCallback(
-    (type, selectedRangeMode = RANGE_MODES.default) => {
+    (type, selectedRangeMode = DEFAULT_RANGE_MODE) => {
       const baseRange = CHART_TYPES[type] || CHART_TYPES.tension;
       if (selectedRangeMode === RANGE_MODES.full) {
         return {
@@ -374,12 +537,29 @@ const LimitsView = () => {
           xMax: FULL_X_RANGE.xMax,
         };
       }
+      if (selectedRangeMode === RANGE_MODES.section2) {
+        return {
+          ...baseRange,
+          xMin: SECTION_2_X_RANGE.xMin,
+          xMax: SECTION_2_X_RANGE.xMax,
+        };
+      }
+      if (selectedRangeMode === RANGE_MODES.section1) {
+        return {
+          ...baseRange,
+          xMin: SECTION_1_X_RANGE.xMin,
+          xMax: SECTION_1_X_RANGE.xMax,
+        };
+      }
       return baseRange;
     },
     []
   );
 
   const currentTypeParam = chartType === "tension" ? "str" : "tem";
+  const isManualDifferentialView = viewMode === VIEW_MODES.manualDiff;
+  const isDifferentialView =
+    viewMode === VIEW_MODES.diff2 || isManualDifferentialView;
 
   const applyChartRange = useCallback((range) => {
     const yMin = range.yMin ?? DEFAULT_RANGE.yMin;
@@ -401,11 +581,14 @@ const LimitsView = () => {
   }, []);
 
   const processedData = useMemo(() => {
+    if (isDifferentialView) {
+      return data;
+    }
     if (noiseMode === NOISE_MODES.std) {
       return applyStdNoiseReduction(data);
     }
     return data;
-  }, [data, noiseMode]);
+  }, [data, isDifferentialView, noiseMode]);
 
   const visibleData = useMemo(() => {
     if (processedData.length === 0) {
@@ -450,17 +633,23 @@ const LimitsView = () => {
   );
 
   const activeReferenceFileId = useMemo(() => {
+    if (isDifferentialView) {
+      return fileIds[0] || null;
+    }
     if (activeFileIds.length > 0) {
       return activeFileIds[activeFileIds.length - 1];
     }
 
     return latestFileId || fileIds[fileIds.length - 1] || null;
-  }, [activeFileIds, fileIds, latestFileId]);
+  }, [activeFileIds, fileIds, isDifferentialView, latestFileId]);
 
   const activeReferenceIndex = useMemo(() => {
+    if (isDifferentialView) {
+      return null;
+    }
     const index = fileIds.findIndex((id) => id === activeReferenceFileId);
     return index >= 0 ? index + 1 : null;
-  }, [activeReferenceFileId, fileIds]);
+  }, [activeReferenceFileId, fileIds, isDifferentialView]);
 
   const sortedThresholdLevels = useMemo(
     () =>
@@ -474,6 +663,9 @@ const LimitsView = () => {
   );
 
   const visibleThresholdSeries = useMemo(() => {
+    if (isDifferentialView) {
+      return [];
+    }
     const currentXMin = xDomain[0];
     const currentXMax = xDomain[1];
     const range = currentXMax - currentXMin || 1;
@@ -489,7 +681,7 @@ const LimitsView = () => {
           (point) => point.distance >= minVisible && point.distance <= maxVisible
         ),
       }));
-  }, [currentTypeParam, sortedThresholdLevels, xDomain]);
+  }, [currentTypeParam, isDifferentialView, sortedThresholdLevels, xDomain]);
 
   const soundThresholdCount = useMemo(
     () => thresholdLevels.filter((level) => level.soundEnabled).length,
@@ -538,20 +730,22 @@ const LimitsView = () => {
         maxY = Math.max(maxY, point.temperature);
       });
 
-      thresholdLevels.forEach((level) => {
-        if (level.type !== currentTypeParam || !Array.isArray(level.points)) {
-          return;
-        }
-
-        level.points.forEach((point) => {
-          if (point.distance < minX || point.distance > maxX) {
+      if (!isDifferentialView) {
+        thresholdLevels.forEach((level) => {
+          if (level.type !== currentTypeParam || !Array.isArray(level.points)) {
             return;
           }
 
-          minY = Math.min(minY, point.thresholdValue);
-          maxY = Math.max(maxY, point.thresholdValue);
+          level.points.forEach((point) => {
+            if (point.distance < minX || point.distance > maxX) {
+              return;
+            }
+
+            minY = Math.min(minY, point.thresholdValue);
+            maxY = Math.max(maxY, point.thresholdValue);
+          });
         });
-      });
+      }
 
       if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
         return [initialStats.yMin, initialStats.yMax];
@@ -570,6 +764,7 @@ const LimitsView = () => {
       hideUnselected,
       initialStats.yMax,
       initialStats.yMin,
+      isDifferentialView,
       thresholdLevels,
     ]
   );
@@ -622,7 +817,14 @@ const LimitsView = () => {
   }, [ensureAudioContext]);
 
   const fetchChartData = useCallback(
-    async (type, channelKey, selectedRangeMode = RANGE_MODES.default) => {
+    async (
+      type,
+      channelKey,
+      selectedRangeMode = DEFAULT_RANGE_MODE,
+      selectedViewMode = VIEW_MODES.compare,
+      selectedReading1 = "",
+      selectedReading2 = ""
+    ) => {
       const channelInfo = CHANNELS[channelKey] || CHANNELS[DEFAULT_CHANNEL];
       const range = getRangeForChart(type, selectedRangeMode);
       setIsReloading(true);
@@ -630,8 +832,25 @@ const LimitsView = () => {
 
       try {
         const param = type === "tension" ? "str" : "tem";
+        const searchParams = new URLSearchParams({
+          type: param,
+          min: String(range.xMin),
+          max: String(range.xMax),
+          ch: channelInfo.id,
+          mode: selectedViewMode,
+        });
+
+        if (selectedViewMode === VIEW_MODES.manualDiff) {
+          if (selectedReading1) {
+            searchParams.set("file1", selectedReading1);
+          }
+          if (selectedReading2) {
+            searchParams.set("file2", selectedReading2);
+          }
+        }
+
         const response = await fetch(
-          `${getApiBase()}/api/ch1-data?type=${param}&min=${range.xMin}&max=${range.xMax}&ch=${channelInfo.id}`
+          `${getApiBase()}/api/ch1-data?${searchParams.toString()}`
         );
         const rawText = await response.text();
 
@@ -651,6 +870,10 @@ const LimitsView = () => {
         const rawPoints = Array.isArray(payload.points) ? payload.points : [];
         const valueDivisor =
           Number(channelInfo.valueDivisor) > 0 ? channelInfo.valueDivisor : 1;
+        const scaleValue = (value) =>
+          Number.isFinite(Number(value))
+            ? Number((Number(value) / valueDivisor).toFixed(6))
+            : value;
         const points =
           valueDivisor === 1
             ? rawPoints
@@ -659,13 +882,58 @@ const LimitsView = () => {
                 temperature:
                   point.temperature == null
                     ? null
-                    : Number((point.temperature / valueDivisor).toFixed(6)),
+                    : scaleValue(point.temperature),
+                latestValue: scaleValue(point.latestValue),
+                previousValue: scaleValue(point.previousValue),
+                differential: scaleValue(point.differential),
               }));
         const latest = payload.latestFile || null;
+        const previous = payload.previousFile || null;
+        const exportRows = Array.isArray(payload.exportRows)
+          ? payload.exportRows.map((row) => ({
+              ...row,
+              distance: Number(row.distance),
+              previousValue: scaleValue(row.previousValue),
+              latestValue: scaleValue(row.latestValue),
+              differential: scaleValue(row.differential),
+            }))
+          : [];
+        const nextComparisonInfo = {
+          mode:
+            payload.mode === VIEW_MODES.manualDiff
+              ? VIEW_MODES.manualDiff
+              : payload.mode === VIEW_MODES.diff2
+                ? VIEW_MODES.diff2
+                : VIEW_MODES.compare,
+          latestFile: latest,
+          previousFile: previous,
+          selectedFiles: Array.isArray(payload.selectedFiles)
+            ? payload.selectedFiles
+            : [],
+          exportRows,
+          differentialReady: Boolean(payload.differentialReady),
+          message:
+            typeof payload.message === "string" && payload.message.trim()
+              ? payload.message.trim()
+              : null,
+        };
+        const nextRange = {
+          ...range,
+          ...getYBoundsFromPoints(points, range),
+        };
 
-        applyChartRange(range);
+        applyChartRange(nextRange);
         setData(points);
         setLatestFileId(latest);
+        setComparisonInfo(nextComparisonInfo);
+        if (selectedViewMode === VIEW_MODES.manualDiff) {
+          setManualReading1((previousValue) =>
+            previousValue === (previous || "") ? previousValue : previous || ""
+          );
+          setManualReading2((previousValue) =>
+            previousValue === (latest || "") ? previousValue : latest || ""
+          );
+        }
 
         const newIds = new Set();
         points.forEach((point) => {
@@ -685,6 +953,7 @@ const LimitsView = () => {
         console.error("Error cargando datos", error);
         setData([]);
         setLatestFileId(null);
+        setComparisonInfo(EMPTY_COMPARISON_INFO);
         setFileVisibility({});
         setDataError(
           `No se pudieron cargar los datos. Usa Recargar. Detalle: ${error?.message || "desconocido"}`
@@ -697,8 +966,23 @@ const LimitsView = () => {
   );
 
   useEffect(() => {
-    void fetchChartData(chartType, channel, rangeMode);
-  }, [chartType, channel, fetchChartData, rangeMode]);
+    void fetchChartData(
+      chartType,
+      channel,
+      rangeMode,
+      viewMode,
+      manualReading1,
+      manualReading2
+    );
+  }, [
+    chartType,
+    channel,
+    fetchChartData,
+    manualReading1,
+    manualReading2,
+    rangeMode,
+    viewMode,
+  ]);
 
   useEffect(() => {
     isReloadingRef.current = isReloading;
@@ -717,18 +1001,12 @@ const LimitsView = () => {
   }, [soundMuted]);
 
   useEffect(() => {
-    const isFullRange =
-      Math.abs(xDomain[0] - initialStats.xMin) < 0.000001 &&
-      Math.abs(xDomain[1] - initialStats.xMax) < 0.000001;
-
-    const nextDomain = isFullRange
-      ? [initialStats.yMin, initialStats.yMax]
-      : computeYDomainForRange(xDomain);
+    const nextDomain = computeYDomainForRange(xDomain);
 
     setYDomain((previous) =>
       domainsAreEqual(previous, nextDomain) ? previous : nextDomain
     );
-  }, [computeYDomainForRange, initialStats.xMax, initialStats.xMin, initialStats.yMax, initialStats.yMin, xDomain]);
+  }, [computeYDomainForRange, xDomain]);
 
   useEffect(() => {
     const syncThresholds = async () => {
@@ -810,7 +1088,14 @@ const LimitsView = () => {
           !isReloadingRef.current
         ) {
           latestFileRef.current = nextLatestFile;
-          void fetchChartData(chartType, channel, rangeMode);
+          void fetchChartData(
+            chartType,
+            channel,
+            rangeMode,
+            viewMode,
+            manualReading1,
+            manualReading2
+          );
         }
       } catch (error) {
         console.error("Error leyendo monitor", error);
@@ -832,16 +1117,37 @@ const LimitsView = () => {
     currentTypeParam,
     fetchChartData,
     getApiBase,
+    manualReading1,
+    manualReading2,
     playAlertTone,
     rangeMode,
+    viewMode,
   ]);
 
   const handleReloadData = () => {
-    void fetchChartData(chartType, channel, rangeMode);
+    void fetchChartData(
+      chartType,
+      channel,
+      rangeMode,
+      viewMode,
+      manualReading1,
+      manualReading2
+    );
   };
 
   const handleChartTypeChange = (type) => {
     setChartType(type);
+  };
+
+  const handleViewModeChange = (event) => {
+    const value = event.target.value;
+    if (
+      value === VIEW_MODES.compare ||
+      value === VIEW_MODES.diff2 ||
+      value === VIEW_MODES.manualDiff
+    ) {
+      setViewMode(value);
+    }
   };
 
   const handleChannelChange = (event) => {
@@ -850,7 +1156,11 @@ const LimitsView = () => {
 
   const handleRangeModeChange = (event) => {
     const value = event.target.value;
-    if (value === RANGE_MODES.default || value === RANGE_MODES.full) {
+    if (
+      value === RANGE_MODES.section1 ||
+      value === RANGE_MODES.section2 ||
+      value === RANGE_MODES.full
+    ) {
       setRangeMode(value);
     }
   };
@@ -860,6 +1170,56 @@ const LimitsView = () => {
     if (value === NOISE_MODES.raw || value === NOISE_MODES.std) {
       setNoiseMode(value);
     }
+  };
+
+  const handleDownloadDifferentialExcel = () => {
+    if (
+      typeof window === "undefined" ||
+      !comparisonInfo.latestFile ||
+      !comparisonInfo.previousFile ||
+      comparisonInfo.exportRows.length === 0
+    ) {
+      return;
+    }
+
+    const channelLabel = CHANNELS[channel]?.label || CHANNELS[DEFAULT_CHANNEL].label;
+    const chartLabel = CHART_TYPES[chartType]?.label || CHART_TYPES.tension.label;
+    const isManualMode = comparisonInfo.mode === VIEW_MODES.manualDiff;
+    const workbookXml = buildDifferentialWorkbookXml({
+      channelLabel,
+      chartLabel,
+      secondFile: comparisonInfo.latestFile,
+      firstFile: comparisonInfo.previousFile,
+      secondLabel: isManualMode ? "Lectura 2" : "Ultima lectura",
+      firstLabel: isManualMode ? "Lectura 1" : "Penultima lectura",
+      rows: comparisonInfo.exportRows,
+    });
+    const blob = new Blob([workbookXml], {
+      type: "application/vnd.ms-excel;charset=utf-8;",
+    });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const safeType = chartType === "temperatura" ? "temperatura" : "tension";
+    const safeChannel = (channelLabel || "canal")
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/gi, "_")
+      .replace(/^_+|_+$/g, "");
+    const safeMode = isManualMode ? "manual" : "ultimas_2";
+
+    link.href = url;
+    link.download = `diferencial_${safeMode}_${safeChannel}_${safeType}.xls`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  };
+
+  const handleManualReading1Change = (event) => {
+    setManualReading1(event.target.value);
+  };
+
+  const handleManualReading2Change = (event) => {
+    setManualReading2(event.target.value);
   };
 
   const toggleFileVisibility = (fileId) => {
@@ -1095,6 +1455,23 @@ const LimitsView = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-600">Vista:</span>
+          <select
+            value={viewMode}
+            onChange={handleViewModeChange}
+            className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm min-w-[240px]"
+          >
+            <option value={VIEW_MODES.compare}>Comparar lecturas</option>
+            <option value={VIEW_MODES.diff2}>
+              Diferencial 2 ultimas lecturas
+            </option>
+            <option value={VIEW_MODES.manualDiff}>
+              Diferencial manual entre lecturas
+            </option>
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2">
           <span className="text-sm text-slate-600">Canal:</span>
           <select
             value={channel}
@@ -1115,21 +1492,24 @@ const LimitsView = () => {
             onChange={handleRangeModeChange}
             className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
           >
-            <option value={RANGE_MODES.default}>Correspondiente</option>
-            <option value={RANGE_MODES.full}>Completo 0 - 1620</option>
+            <option value={RANGE_MODES.full}>Vista completa</option>
+            <option value={RANGE_MODES.section1}>Tramo 1</option>
+            <option value={RANGE_MODES.section2}>Tramo 2</option>
           </select>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-slate-600">Ruido:</span>
-          <select
-            value={noiseMode}
-            onChange={handleNoiseModeChange}
-            className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
-          >
-            <option value={NOISE_MODES.raw}>Original</option>
-            <option value={NOISE_MODES.std}>Desviacion estandar (N)</option>
-          </select>
-        </div>
+        {!isDifferentialView && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-slate-600">Ruido:</span>
+            <select
+              value={noiseMode}
+              onChange={handleNoiseModeChange}
+              className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
+            >
+              <option value={NOISE_MODES.raw}>Original</option>
+              <option value={NOISE_MODES.std}>Desviacion estandar (N)</option>
+            </select>
+          </div>
+        )}
 
         {dataError ? (
           <span className="ml-auto text-sm text-red-600">{dataError}</span>
@@ -1255,7 +1635,124 @@ const LimitsView = () => {
             )}
           </div>
 
-          {fileIds.length > 0 && (
+          {viewMode === VIEW_MODES.diff2 && (
+            <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4">
+              <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                <div className="space-y-1">
+                  <div className="text-sm font-semibold text-slate-800">
+                    Diferencial entre las 2 ultimas lecturas
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Archivo mas reciente:{" "}
+                    <span className="font-medium text-slate-700">
+                      {comparisonInfo.latestFile || "--"}
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Archivo penultimo:{" "}
+                    <span className="font-medium text-slate-700">
+                      {comparisonInfo.previousFile || "--"}
+                    </span>
+                  </div>
+                  {comparisonInfo.message && (
+                    <div className="text-xs text-amber-600">
+                      {comparisonInfo.message}
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={handleDownloadDifferentialExcel}
+                  disabled={comparisonInfo.exportRows.length === 0}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                    comparisonInfo.exportRows.length > 0
+                      ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                      : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                  }`}
+                >
+                  Descargar Excel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isManualDifferentialView && (
+            <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-4">
+              <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 flex-1">
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Lectura 1
+                    </label>
+                    <select
+                      value={manualReading1}
+                      onChange={handleManualReading1Change}
+                      className="w-full text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
+                    >
+                      <option value="">Selecciona lectura 1</option>
+                      {comparisonInfo.selectedFiles.map((fileId) => (
+                        <option key={`manual-1-${fileId}`} value={fileId}>
+                          {fileId}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Lectura 2
+                    </label>
+                    <select
+                      value={manualReading2}
+                      onChange={handleManualReading2Change}
+                      className="w-full text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
+                    >
+                      <option value="">Selecciona lectura 2</option>
+                      {comparisonInfo.selectedFiles.map((fileId) => (
+                        <option key={`manual-2-${fileId}`} value={fileId}>
+                          {fileId}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleDownloadDifferentialExcel}
+                  disabled={comparisonInfo.exportRows.length === 0}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                    comparisonInfo.exportRows.length > 0
+                      ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                      : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                  }`}
+                >
+                  Descargar Excel
+                </button>
+              </div>
+
+              <div className="space-y-1 text-xs text-slate-500">
+                <div>
+                  Resultado mostrado: <span className="font-medium">Lectura 2 - Lectura 1</span>
+                </div>
+                <div>
+                  Lectura 1:{" "}
+                  <span className="font-medium text-slate-700">
+                    {comparisonInfo.previousFile || manualReading1 || "--"}
+                  </span>
+                </div>
+                <div>
+                  Lectura 2:{" "}
+                  <span className="font-medium text-slate-700">
+                    {comparisonInfo.latestFile || manualReading2 || "--"}
+                  </span>
+                </div>
+                {comparisonInfo.message && (
+                  <div className="text-amber-600">{comparisonInfo.message}</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!isDifferentialView && fileIds.length > 0 && (
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex flex-wrap gap-2">
                 {fileIds.map((fileId, index) => {
@@ -1298,6 +1795,7 @@ const LimitsView = () => {
             visibleData={chartData}
             lineColor={CHANNELS[channel]?.color || CHANNELS[DEFAULT_CHANNEL].color}
             chartType={chartType}
+            viewMode={viewMode}
             latestFileId={latestFileId}
             fileIds={fileIds}
             fileVisibility={fileVisibility}
@@ -1305,10 +1803,10 @@ const LimitsView = () => {
             thresholdSeries={visibleThresholdSeries}
             activeReferenceFileId={activeReferenceFileId}
             activeReferenceIndex={activeReferenceIndex}
+            comparisonInfo={comparisonInfo}
             zoomSelection={zoomSelection}
             xDomain={xDomain}
             yDomain={yDomain}
-            initialStats={initialStats}
             chartContainerRef={chartContainerRef}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
@@ -1316,20 +1814,22 @@ const LimitsView = () => {
           />
         </div>
 
-        <ControlPanel
-          thresholdInput={thresholdInput}
-          onThresholdInputChange={setThresholdInput}
-          thresholdColor={thresholdColor}
-          onThresholdColorChange={setThresholdColor}
-          thresholdSoundEnabled={thresholdSoundEnabled}
-          onThresholdSoundEnabledChange={setThresholdSoundEnabled}
-          onThresholdInputKeyDown={handleThresholdInputKeyDown}
-          onAddThreshold={handleAddThreshold}
-          thresholdLevels={sortedThresholdLevels}
-          onRemoveThreshold={handleRemoveThreshold}
-          activeReferenceIndex={activeReferenceIndex}
-          selectedFileCount={activeFileIds.length}
-        />
+        {!isDifferentialView && (
+          <ControlPanel
+            thresholdInput={thresholdInput}
+            onThresholdInputChange={setThresholdInput}
+            thresholdColor={thresholdColor}
+            onThresholdColorChange={setThresholdColor}
+            thresholdSoundEnabled={thresholdSoundEnabled}
+            onThresholdSoundEnabledChange={setThresholdSoundEnabled}
+            onThresholdInputKeyDown={handleThresholdInputKeyDown}
+            onAddThreshold={handleAddThreshold}
+            thresholdLevels={sortedThresholdLevels}
+            onRemoveThreshold={handleRemoveThreshold}
+            activeReferenceIndex={activeReferenceIndex}
+            selectedFileCount={activeFileIds.length}
+          />
+        )}
       </div>
     </div>
   );
