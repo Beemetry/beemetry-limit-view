@@ -1,31 +1,20 @@
 ﻿import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-import { handleCh1ApiRequest } from "./ch1-data-service.js";
+import { handleFiberMonitorApiRequest } from "./fiber-monitor-service.js";
+import { readRequestBody } from "./http-body-utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DATA_ROOT = path.join(__dirname, "src", "Fibra Exportada");
-const PORT = process.env.CH1_API_PORT || 4174;
-
-const readRequestBody = (req) =>
-  new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => {
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      resolve(Buffer.concat(chunks).toString("utf-8"));
-    });
-    req.on("error", reject);
-  });
+const PORT = process.env.FIBER_MONITOR_PORT || process.env.CH1_API_PORT || 4174;
 
 const handleRequest = async (req, res) => {
   const bodyText =
     req.method === "POST" ? await readRequestBody(req) : "";
 
-  const result = await handleCh1ApiRequest({
+  const result = await handleFiberMonitorApiRequest({
     method: req.method,
     urlString: req.url || "",
     host: req.headers.host || "localhost",
@@ -56,6 +45,6 @@ http
     void handleRequest(req, res);
   })
   .listen(PORT, () => {
-    console.log(`ch1 API running at http://localhost:${PORT}/api/ch1-data`);
+    console.log(`Fiber monitor API running at http://localhost:${PORT}/api/ch1-data`);
     console.log(`Reading from: ${DATA_ROOT}`);
   });

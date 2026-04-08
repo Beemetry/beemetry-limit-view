@@ -1,6 +1,7 @@
-import { watch } from "fs";
+import { watch, readFileSync } from "fs";
 import fs from "fs/promises";
 import path from "path";
+import { fileURLToPath } from "url";
 
 export const API_PATHNAME = "/api/ch1-data";
 export const MONITOR_STATE_PATHNAME = "/api/monitor-state";
@@ -12,12 +13,61 @@ export const CHANNEL_DIRS = {
 };
 export const FILES_PER_CHANNEL = 12;
 
-const TELEGRAM_TOKEN = "8439005950:AAEdVzasE49fdLiDJt0sdnZUX9Y3b_Yw6p4_";
-const TELEGRAM_CHAT_ID = "-5155804898_";
+const loadEnvFileIfPresent = () => {
+  const envPath = path.resolve(process.cwd(), ".env");
+  let rawText = "";
+  try {
+    rawText = readFileSync(envPath, "utf-8");
+  } catch {
+    return;
+  }
+
+  rawText.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      return;
+    }
+
+    const separatorIndex = trimmed.indexOf("=");
+    if (separatorIndex <= 0) {
+      return;
+    }
+
+    const key = trimmed.slice(0, separatorIndex).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || process.env[key] !== undefined) {
+      return;
+    }
+
+    let value = trimmed.slice(separatorIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    process.env[key] = value;
+  });
+};
+
+loadEnvFileIfPresent();
+
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+const TELEGRAM_MANUAL_ALERTS_CONTROL = false;
 const DATE_IN_NAME_REGEX = /(\d{4}-\d{2}-\d{2})/;
 const TIMESTAMP_IN_NAME_REGEX = /(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)/;
 const ALERT_HISTORY_LIMIT = 100;
 const WATCH_DEBOUNCE_MS = 400;
+const ALERT_KEY_PERSIST_DEBOUNCE_MS = 300;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PERSISTENCE_DIR = path.join(__dirname, "runtime-data");
+const PERSISTED_THRESHOLDS_FILE = path.join(PERSISTENCE_DIR, "thresholds.json");
+const PERSISTED_ALERT_KEYS_FILE = path.join(
+  PERSISTENCE_DIR,
+  "triggered-alert-keys.json"
+);
 const JSON_HEADERS = {
   "Content-Type": "application/json",
   "Access-Control-Allow-Origin": "*",
@@ -34,6 +84,9 @@ const monitorStore = {
   versions: {},
   lastProcessedFileByKey: new Map(),
   triggeredAlertKeys: new Set(),
+  stateReady: false,
+  stateReadyPromise: null,
+  persistAlertKeysTimer: null,
 };
 
 const pad2 = (value) => String(value).padStart(2, "0");
@@ -74,6 +127,7 @@ const sortChronological = (a, b) => {
 };
 
 const getMonitorKey = (channel, type) => `${channel}:${type}`;
+const DEFAULT_THRESHOLD_CHANNEL_ID = "1";
 
 const normalizeDistanceKey = (value) => Number(value).toFixed(3);
 
@@ -221,7 +275,7 @@ const buildDifferentialRows = ({
     .sort((a, b) => a.distance - b.distance);
 };
 
-const buildNormalPayload = async ({ dataDir, selectedFiles, range }) => {
+const buildComparisonPayload = async ({ dataDir, selectedFiles, range }) => {
   let combined = [];
 
   for (let index = 0; index < selectedFiles.length; index += 1) {
@@ -331,7 +385,12 @@ const buildDifferentialPayload = async ({
 };
 
 const sendTelegramAlert = async (message) => {
-  if (typeof fetch !== "function") {
+  if (
+    !TELEGRAM_MANUAL_ALERTS_CONTROL ||
+    !TELEGRAM_TOKEN ||
+    !TELEGRAM_CHAT_ID ||
+    typeof fetch !== "function"
+  ) {
     return;
   }
 
@@ -355,6 +414,8 @@ const sanitizeAlertForClient = (alert) => ({
   id: alert.id,
   channel: alert.channel,
   type: alert.type,
+  thresholdMode: alert.thresholdMode,
+  thresholdOffset: alert.thresholdOffset,
   fileId: alert.fileId,
   thresholdId: alert.thresholdId,
   thresholdLabel: alert.thresholdLabel,
@@ -381,10 +442,19 @@ const buildThresholdLookup = (points) => {
 
 const normalizeThreshold = (item) => {
   const type = item?.type === "str" ? "str" : item?.type === "tem" ? "tem" : null;
+  const channelId = String(item?.channelId || DEFAULT_THRESHOLD_CHANNEL_ID);
+  const mode = item?.mode === "offset" ? "offset" : "percent";
   const percent = Number(item?.percent);
+  const offsetValue = Number(item?.offsetValue);
   const floor = Number(item?.floor);
   const sourceFileIndex = Number(item?.sourceFileIndex);
-  if (!type || !Number.isFinite(percent)) {
+  if (!type || !Object.prototype.hasOwnProperty.call(CHANNEL_DIRS, channelId)) {
+    return null;
+  }
+  if (mode === "percent" && !Number.isFinite(percent)) {
+    return null;
+  }
+  if (mode === "offset" && !Number.isFinite(offsetValue)) {
     return null;
   }
 
@@ -406,8 +476,11 @@ const normalizeThreshold = (item) => {
 
   return {
     id: String(item?.id || `${Date.now()}_${Math.random()}`),
+    channelId,
     type,
-    percent: Number(percent.toFixed(1)),
+    mode,
+    percent: mode === "percent" ? Number(percent.toFixed(1)) : null,
+    offsetValue: mode === "offset" ? Number(offsetValue.toFixed(3)) : null,
     floor: Number.isFinite(floor) ? floor : 0,
     color: typeof item?.color === "string" ? item.color : "#2563eb",
     sourceFileId: typeof item?.sourceFileId === "string" ? item.sourceFileId : "",
@@ -417,14 +490,133 @@ const normalizeThreshold = (item) => {
     thresholdLabel:
       typeof item?.thresholdLabel === "string" && item.thresholdLabel.trim()
         ? item.thresholdLabel.trim()
-        : `Umbral al ${Number(percent).toFixed(1)}%`,
+        : mode === "percent"
+          ? `Umbral al ${Number(percent).toFixed(1)}%`
+          : `Umbral +${Number(offsetValue).toFixed(3)}`,
     lookup: buildThresholdLookup(points),
   };
 };
 
+const serializeThreshold = (threshold) => ({
+  id: threshold.id,
+  channelId: threshold.channelId,
+  type: threshold.type,
+  mode: threshold.mode,
+  percent: threshold.percent,
+  offsetValue: threshold.offsetValue,
+  floor: threshold.floor,
+  color: threshold.color,
+  sourceFileId: threshold.sourceFileId,
+  sourceFileIndex: threshold.sourceFileIndex,
+  soundEnabled: threshold.soundEnabled,
+  thresholdLabel: threshold.thresholdLabel,
+  points: threshold.points.map((point) => ({
+    distance: point.distance,
+    thresholdValue: point.thresholdValue,
+  })),
+});
+
+const readJsonFileOrDefault = async (filePath, fallbackValue) => {
+  try {
+    const rawText = await fs.readFile(filePath, "utf-8");
+    return JSON.parse(rawText);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.error("Error reading persisted JSON", filePath, error);
+    }
+    return fallbackValue;
+  }
+};
+
+const writeJsonFile = async (filePath, payload) => {
+  await fs.mkdir(PERSISTENCE_DIR, { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8");
+};
+
+const getThresholdIdFromAlertKey = (alertKey) => {
+  const lastSeparator = alertKey.lastIndexOf(":");
+  if (lastSeparator === -1) {
+    return null;
+  }
+  return alertKey.slice(lastSeparator + 1);
+};
+
+const pruneTriggeredAlertKeys = () => {
+  const activeThresholdIds = new Set(monitorStore.thresholds.map((item) => item.id));
+  monitorStore.triggeredAlertKeys = new Set(
+    [...monitorStore.triggeredAlertKeys].filter((alertKey) =>
+      activeThresholdIds.has(getThresholdIdFromAlertKey(alertKey))
+    )
+  );
+};
+
+const persistThresholdsToDisk = async () => {
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    thresholds: monitorStore.thresholds.map(serializeThreshold),
+  };
+  await writeJsonFile(PERSISTED_THRESHOLDS_FILE, payload);
+};
+
+const persistTriggeredAlertKeysToDisk = async () => {
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    keys: [...monitorStore.triggeredAlertKeys],
+  };
+  await writeJsonFile(PERSISTED_ALERT_KEYS_FILE, payload);
+};
+
+const schedulePersistTriggeredAlertKeys = () => {
+  if (monitorStore.persistAlertKeysTimer) {
+    clearTimeout(monitorStore.persistAlertKeysTimer);
+  }
+
+  monitorStore.persistAlertKeysTimer = setTimeout(() => {
+    monitorStore.persistAlertKeysTimer = null;
+    void persistTriggeredAlertKeysToDisk();
+  }, ALERT_KEY_PERSIST_DEBOUNCE_MS);
+};
+
+const ensureStateReady = async () => {
+  if (monitorStore.stateReady) {
+    return;
+  }
+  if (monitorStore.stateReadyPromise) {
+    await monitorStore.stateReadyPromise;
+    return;
+  }
+
+  monitorStore.stateReadyPromise = (async () => {
+    const [thresholdSnapshot, keySnapshot] = await Promise.all([
+      readJsonFileOrDefault(PERSISTED_THRESHOLDS_FILE, {}),
+      readJsonFileOrDefault(PERSISTED_ALERT_KEYS_FILE, {}),
+    ]);
+
+    const persistedThresholds = Array.isArray(thresholdSnapshot?.thresholds)
+      ? thresholdSnapshot.thresholds
+      : [];
+    const persistedKeys = Array.isArray(keySnapshot?.keys)
+      ? keySnapshot.keys.filter((item) => typeof item === "string")
+      : [];
+
+    monitorStore.thresholds = persistedThresholds
+      .map(normalizeThreshold)
+      .filter(Boolean);
+    monitorStore.triggeredAlertKeys = new Set(persistedKeys);
+    pruneTriggeredAlertKeys();
+    monitorStore.stateReady = true;
+  })();
+
+  try {
+    await monitorStore.stateReadyPromise;
+  } finally {
+    monitorStore.stateReadyPromise = null;
+  }
+};
+
 const setThresholds = (thresholds) => {
   monitorStore.thresholds = thresholds.map(normalizeThreshold).filter(Boolean);
-  monitorStore.triggeredAlertKeys.clear();
+  pruneTriggeredAlertKeys();
 };
 
 const evaluateThresholdsForFile = async ({
@@ -434,7 +626,9 @@ const evaluateThresholdsForFile = async ({
   filename,
 }) => {
   const matchingThresholds = monitorStore.thresholds.filter(
-    (threshold) => threshold.type === type
+    (threshold) =>
+      threshold.type === type &&
+      String(threshold.channelId || DEFAULT_THRESHOLD_CHANNEL_ID) === String(channel)
   );
 
   if (matchingThresholds.length === 0) {
@@ -485,6 +679,7 @@ const evaluateThresholdsForFile = async ({
     }
 
     monitorStore.triggeredAlertKeys.add(alertKey);
+    schedulePersistTriggeredAlertKeys();
 
     const alert = {
       id: `${Date.now()}_${Math.random()}`,
@@ -494,6 +689,8 @@ const evaluateThresholdsForFile = async ({
       thresholdId: threshold.id,
       thresholdLabel: threshold.thresholdLabel,
       thresholdPercent: threshold.percent,
+      thresholdMode: threshold.mode,
+      thresholdOffset: threshold.offsetValue,
       measuredValue: Number(maxHit.measuredValue.toFixed(3)),
       thresholdValue: Number(maxHit.thresholdValue.toFixed(3)),
       distance: Number(maxHit.distance.toFixed(3)),
@@ -602,7 +799,7 @@ const getMonitorStatePayload = () => ({
   thresholdCount: monitorStore.thresholds.length,
 });
 
-export const readChannelData = async ({
+export const readFiberChannelData = async ({
   dataRoot,
   channel,
   type,
@@ -613,6 +810,7 @@ export const readChannelData = async ({
   now = new Date(),
   logger = null,
 }) => {
+  await ensureStateReady();
   ensureMonitorStarted(dataRoot);
 
   const channelDir = CHANNEL_DIRS[channel];
@@ -659,14 +857,14 @@ export const readChannelData = async ({
     });
   }
 
-  return buildNormalPayload({
+  return buildComparisonPayload({
     dataDir,
     selectedFiles: selected,
     range,
   });
 };
 
-export const handleApiRequest = async ({
+export const handleFiberMonitorApiRequest = async ({
   method,
   urlString,
   host = "localhost",
@@ -674,6 +872,7 @@ export const handleApiRequest = async ({
   logger = null,
   bodyText = "",
 }) => {
+  await ensureStateReady();
   ensureMonitorStarted(dataRoot);
 
   const url = new URL(urlString, `http://${host}`);
@@ -722,7 +921,7 @@ export const handleApiRequest = async ({
     const file2Param = url.searchParams.get("file2");
 
     try {
-      const payload = await readChannelData({
+      const payload = await readFiberChannelData({
         dataRoot,
         channel: channelParam,
         type: typeParam,
@@ -777,6 +976,19 @@ export const handleApiRequest = async ({
     };
   }
 
+  if (method === "GET") {
+    return {
+      handled: true,
+      statusCode: 200,
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        ok: true,
+        thresholdCount: monitorStore.thresholds.length,
+        thresholds: monitorStore.thresholds.map(serializeThreshold),
+      }),
+    };
+  }
+
   if (method !== "POST") {
     return {
       handled: true,
@@ -790,6 +1002,10 @@ export const handleApiRequest = async ({
     const payload = bodyText ? JSON.parse(bodyText) : {};
     const thresholds = Array.isArray(payload?.thresholds) ? payload.thresholds : [];
     setThresholds(thresholds);
+    await Promise.all([
+      persistThresholdsToDisk(),
+      persistTriggeredAlertKeysToDisk(),
+    ]);
 
     return {
       handled: true,
@@ -798,6 +1014,7 @@ export const handleApiRequest = async ({
       body: JSON.stringify({
         ok: true,
         thresholdCount: monitorStore.thresholds.length,
+        thresholds: monitorStore.thresholds.map(serializeThreshold),
       }),
     };
   } catch (error) {
@@ -814,4 +1031,7 @@ export const handleApiRequest = async ({
   }
 };
 
-export const handleCh1ApiRequest = handleApiRequest;
+// Backward-compatibility exports while callers migrate to fiber-monitor naming.
+export const readChannelData = readFiberChannelData;
+export const handleApiRequest = handleFiberMonitorApiRequest;
+export const handleCh1ApiRequest = handleFiberMonitorApiRequest;

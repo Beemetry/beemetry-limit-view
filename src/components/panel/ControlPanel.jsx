@@ -1,7 +1,11 @@
 import React from "react";
-import { Activity, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 
 const ControlPanel = ({
+  thresholdMode,
+  onThresholdModeChange,
+  thresholdName,
+  onThresholdNameChange,
   thresholdInput,
   onThresholdInputChange,
   thresholdColor,
@@ -12,32 +16,14 @@ const ControlPanel = ({
   onAddThreshold,
   thresholdLevels,
   onRemoveThreshold,
-  activeReferenceIndex,
-  selectedFileCount,
 }) => {
   const hasThresholds = thresholdLevels.length > 0;
+  const isPercentMode = thresholdMode !== "offset";
 
   return (
     <div className="bg-white border-t border-slate-300 shadow-xl z-20 overflow-y-auto flex flex-col max-h-[420px]">
       <div className="flex-1 p-4 grid grid-cols-12 gap-6 min-h-0">
-        <div className="col-span-3 flex flex-col gap-4">
-          <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
-            <label className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase mb-3">
-              <Activity size={14} /> Referencia Activa
-            </label>
-            <div className="text-3xl font-semibold text-slate-800 text-center">
-              {activeReferenceIndex ?? "--"}
-            </div>
-            <p className="text-[11px] text-slate-500 mt-2 text-center">
-              Ultima lectura activa entre los archivos seleccionados
-            </p>
-            <p className="text-[11px] text-slate-400 mt-1 text-center">
-              Archivos seleccionados: {selectedFileCount}
-            </p>
-          </div>
-        </div>
-
-        <div className="col-span-4 bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col gap-4">
+        <div className="col-span-5 bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col gap-4">
           <div>
             <h3 className="text-sm font-bold text-slate-800 uppercase">
               Nuevo Umbral
@@ -48,16 +34,45 @@ const ControlPanel = ({
             </p>
           </div>
 
-          <div className="grid grid-cols-[1fr_110px] gap-3">
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-500 uppercase">
+              Nombre del umbral
+            </label>
+            <input
+              type="text"
+              maxLength={80}
+              placeholder="Ej: Alerta umbral minimo"
+              className="w-full text-sm px-3 py-2 rounded border border-slate-200 bg-white"
+              value={thresholdName}
+              onChange={(event) => onThresholdNameChange(event.target.value)}
+              onKeyDown={onThresholdInputKeyDown}
+            />
+          </div>
+
+          <div className="grid grid-cols-[1fr_120px] gap-3">
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-slate-500 uppercase">
-                Porcentaje
+                Tipo
+              </label>
+              <select
+                className="w-full text-sm px-3 py-2 rounded border border-slate-200 bg-white"
+                value={thresholdMode}
+                onChange={(event) => onThresholdModeChange(event.target.value)}
+              >
+                <option value="percent">Porcentaje</option>
+                <option value="offset">Sumatoria (+)</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                {isPercentMode ? "Porcentaje" : "Sumatoria"}
               </label>
               <div className="relative">
                 <input
                   type="number"
-                  min="0.1"
-                  step="0.1"
+                  min={isPercentMode ? "0.1" : "0.01"}
+                  step={isPercentMode ? "0.1" : "0.01"}
                   className="w-full text-sm px-3 py-2 rounded border border-slate-200 bg-white pr-8"
                   value={thresholdInput}
                   onChange={(event) =>
@@ -66,7 +81,7 @@ const ControlPanel = ({
                   onKeyDown={onThresholdInputKeyDown}
                 />
                 <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
-                  %
+                  {isPercentMode ? "%" : "+"}
                 </span>
               </div>
             </div>
@@ -104,7 +119,7 @@ const ControlPanel = ({
           </button>
         </div>
 
-        <div className="col-span-5 flex flex-col h-full overflow-hidden">
+        <div className="col-span-7 flex flex-col h-full overflow-hidden">
           <div className="flex items-center justify-between mb-2 flex-none">
             <h3 className="text-sm font-bold text-slate-800">
               Umbrales Activos ({thresholdLevels.length})
@@ -131,10 +146,18 @@ const ControlPanel = ({
                       <div className="font-semibold text-slate-800">
                         {level.thresholdLabel}
                       </div>
-                      <div className="text-slate-500">
-                        Piso minimo: {level.floor.toFixed(2)}
-                      </div>
+                      {level.mode === "offset" ? (
+                        <div className="text-slate-500">
+                          Sumatoria fija: +{Number(level.offsetValue || 0).toFixed(2)}
+                        </div>
+                      ) : (
+                        <div className="text-slate-500">
+                          Piso minimo: {Number(level.floor || 0).toFixed(2)}
+                        </div>
+                      )}
                       <div className="text-slate-400">
+                        Canal #{level.channelId || "--"} |{" "}
+                        {level.type === "str" ? "Tension" : "Temperatura"} |{" "}
                         Base: lectura #{level.sourceFileIndex ?? "--"}
                         {level.soundEnabled ? " | sonido" : ""}
                       </div>

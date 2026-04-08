@@ -24,6 +24,8 @@ const LimitsChart = ({
   lineColor = "#3b82f6",
   chartType,
   viewMode,
+  noiseMode = "raw",
+  diffNoiseEnabled = false,
   latestFileId,
   fileIds = [],
   fileVisibility = {},
@@ -44,17 +46,31 @@ const LimitsChart = ({
   const isDifferentialView = viewMode === "diff2";
   const isManualDifferentialView = viewMode === "manual_diff";
   const isAnyDifferentialView = isDifferentialView || isManualDifferentialView;
+  const isStdCompareMode = !isAnyDifferentialView && noiseMode === "std";
+  const isStdDifferentialMode = isAnyDifferentialView && diffNoiseEnabled;
   const yLabel = isDifferentialView
     ? isTemperatureChart
-      ? "Diferencial Temperatura (C)"
-      : "Diferencial Tension (uE)"
+      ? isStdDifferentialMode
+        ? "DE diferencial Temperatura (sigma)"
+        : "Diferencial Temperatura (C)"
+      : isStdDifferentialMode
+        ? "DE diferencial Tension (sigma)"
+        : "Diferencial Tension (uE)"
     : isManualDifferentialView
       ? isTemperatureChart
-        ? "Diferencial Manual Temperatura (C)"
-        : "Diferencial Manual Tension (uE)"
+        ? isStdDifferentialMode
+          ? "DE manual Temperatura (sigma)"
+          : "Diferencial Manual Temperatura (C)"
+        : isStdDifferentialMode
+          ? "DE manual Tension (sigma)"
+          : "Diferencial Manual Tension (uE)"
+      : isStdCompareMode
+        ? isTemperatureChart
+          ? "Desviacion estandar (sigma) Temperatura"
+          : "Desviacion estandar (sigma) Tension"
       : isTemperatureChart
-      ? "Temperatura (C)"
-      : "Tension (uE)";
+        ? "Temperatura (C)"
+        : "Tension (uE)";
 
   const groupedByFile = React.useMemo(() => {
     const map = {};
@@ -126,7 +142,13 @@ const LimitsChart = ({
       return (
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-md text-xs space-y-1">
           <div className="font-semibold text-slate-700">
-            {isAnyDifferentialView ? "Diferencial" : activeReferenceIndex ?? "N/A"}
+            {isAnyDifferentialView
+              ? isStdDifferentialMode
+                ? "DE diferencial"
+                : "Diferencial"
+              : isStdCompareMode
+                ? "Sigma"
+                : activeReferenceIndex ?? "N/A"}
           </div>
           <div className="text-slate-600">
             Distancia aproximada:{" "}
@@ -134,15 +156,25 @@ const LimitsChart = ({
           </div>
           <div className="text-slate-800">
             {isAnyDifferentialView
-              ? resultLabel
-              : isTemperatureChart
-                ? "Temperatura (Y)"
-                : "Tension (Y)"}
+              ? isStdDifferentialMode
+                ? "Desviacion estandar (Y)"
+                : resultLabel
+              : isStdCompareMode
+                ? "Desviacion estandar (Y)"
+                : isTemperatureChart
+                  ? "Temperatura (Y)"
+                  : "Tension (Y)"}
             :{" "}
             {Number.isFinite(Number(selected.value))
               ? Number(selected.value).toFixed(3)
               : selected.value}
           </div>
+          {(isStdCompareMode || isStdDifferentialMode) &&
+            Number.isFinite(Number(point.meanValue)) && (
+              <div className="text-slate-600">
+                Promedio (mu): {Number(point.meanValue).toFixed(3)}
+              </div>
+            )}
           {isAnyDifferentialView && (
             <>
               <div className="text-slate-700">
@@ -195,10 +227,14 @@ const LimitsChart = ({
       activeReferenceIndex,
       comparisonInfo?.latestFile,
       comparisonInfo?.previousFile,
+      diffNoiseEnabled,
       isDifferentialView,
       isAnyDifferentialView,
       isManualDifferentialView,
+      isStdCompareMode,
+      isStdDifferentialMode,
       isTemperatureChart,
+      noiseMode,
       tooltipFileId,
     ]
   );

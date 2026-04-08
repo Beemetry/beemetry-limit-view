@@ -42,6 +42,10 @@ const NOISE_MODES = {
   raw: "raw",
   std: "std",
 };
+const THRESHOLD_MODES = {
+  percent: "percent",
+  offset: "offset",
+};
 const FULL_X_RANGE = {
   xMin: 0,
   xMax: 1620,
@@ -79,6 +83,7 @@ const THRESHOLD_COLORS = [
   "#f97316",
 ];
 const DEFAULT_THRESHOLD_INPUT = "20";
+const DEFAULT_THRESHOLD_MODE = THRESHOLD_MODES.percent;
 const MAX_CHART_POINTS = 4000;
 const FLOOR_REFERENCE_PERCENT = 20;
 const FLOOR_AT_REFERENCE_PERCENT = 5;
@@ -236,6 +241,14 @@ const getThresholdValue = (value, percent) => {
   return Number((value + margin).toFixed(3));
 };
 
+const getThresholdValueWithOffset = (value, offset) => {
+  if (!Number.isFinite(value) || !Number.isFinite(offset)) {
+    return null;
+  }
+
+  return Number((value + offset).toFixed(3));
+};
+
 const formatAlertTime = (isoValue) => {
   if (!isoValue) {
     return "--:--:--";
@@ -384,10 +397,154 @@ const buildDifferentialWorkbookXml = ({
 </Workbook>`;
 };
 
+const buildStdWorkbookXml = ({
+  channelLabel,
+  chartLabel,
+  fileIds,
+  rows,
+}) => {
+  const headerRow = [
+    "Distancia (m)",
+    ...fileIds.map((_, index) => `Lectura ${index + 1}`),
+    "Promedio (mu)",
+    "Desviacion estandar (sigma)",
+  ];
+
+  const fileNameRow = [
+    "Archivo",
+    ...fileIds.map((fileId) => fileId),
+    "",
+    "",
+  ];
+
+  const headerRows = [
+    ["Canal", channelLabel],
+    ["Grafico", chartLabel],
+    ["Modo", "Desviacion estandar (N)"],
+    ["Total lecturas", String(fileIds.length)],
+    ["", ""],
+    fileNameRow,
+    headerRow,
+  ];
+
+  const xmlRows = [
+    ...headerRows.map((cells, index) => {
+      const isColumnHeader = index === headerRows.length - 1;
+      const styleId = isColumnHeader ? "header" : "meta";
+      return `<Row>${cells
+        .map((cell) => buildExcelCell(cell, "String", styleId))
+        .join("")}</Row>`;
+    }),
+    ...rows.map((row) => {
+      const distance = Number(row.distance);
+      const mean = Number(row.meanValue);
+      const sigma = Number(row.stdDev);
+      const readingCells = fileIds.map((fileId) => {
+        const readingValue = row.valuesByFile?.[fileId];
+        return buildExcelCell(
+          Number.isFinite(readingValue) ? readingValue.toFixed(6) : "",
+          Number.isFinite(readingValue) ? "Number" : "String"
+        );
+      });
+
+      return `<Row>${[
+        buildExcelCell(
+          Number.isFinite(distance) ? distance.toFixed(6) : row.distance,
+          "Number"
+        ),
+        ...readingCells,
+        buildExcelCell(Number.isFinite(mean) ? mean.toFixed(6) : "", "Number"),
+        buildExcelCell(Number.isFinite(sigma) ? sigma.toFixed(6) : "", "Number"),
+      ].join("")}</Row>`;
+    }),
+  ].join("");
+
+  return `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook
+  xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:x="urn:schemas-microsoft-com:office:excel"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:html="http://www.w3.org/TR/REC-html40"
+>
+  <Styles>
+    <Style ss:ID="meta">
+      <Font ss:Bold="1" />
+    </Style>
+    <Style ss:ID="header">
+      <Font ss:Bold="1" />
+      <Interior ss:Color="#DBEAFE" ss:Pattern="Solid" />
+    </Style>
+  </Styles>
+  <Worksheet ss:Name="DesviacionEstandar">
+    <Table>
+      ${xmlRows}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+};
+
+const buildStdExportRows = ({ rawPoints, stdPoints, fileIds }) => {
+  const rowsByDistance = new Map();
+
+  rawPoints.forEach((point) => {
+    if (
+      !point ||
+      !Number.isFinite(point.distance) ||
+      point.temperature == null ||
+      Number.isNaN(point.temperature) ||
+      !point.fileId
+    ) {
+      return;
+    }
+
+    const key = Number(point.distance).toFixed(6);
+    if (!rowsByDistance.has(key)) {
+      rowsByDistance.set(key, {
+        distance: Number(Number(point.distance).toFixed(6)),
+        valuesByFile: {},
+      });
+    }
+
+    rowsByDistance.get(key).valuesByFile[point.fileId] = Number(point.temperature);
+  });
+
+  return stdPoints
+    .filter(
+      (point) =>
+        Number.isFinite(point?.distance) &&
+        Number.isFinite(point?.temperature) &&
+        Number.isFinite(point?.meanValue)
+    )
+    .map((point) => {
+      const key = Number(point.distance).toFixed(6);
+      const rowBase = rowsByDistance.get(key) || {
+        distance: Number(Number(point.distance).toFixed(6)),
+        valuesByFile: {},
+      };
+
+      // Ensure all requested file columns exist even if that point is missing.
+      const normalizedValues = {};
+      fileIds.forEach((fileId) => {
+        const value = rowBase.valuesByFile[fileId];
+        normalizedValues[fileId] = Number.isFinite(value) ? value : null;
+      });
+
+      return {
+        distance: rowBase.distance,
+        valuesByFile: normalizedValues,
+        meanValue: Number(point.meanValue),
+        stdDev: Number(point.temperature),
+      };
+    })
+    .sort((a, b) => a.distance - b.distance);
+};
+
 const domainsAreEqual = (a, b) =>
   Math.abs(a[0] - b[0]) < 0.000001 && Math.abs(a[1] - b[1]) < 0.000001;
 
-const applyStdNoiseReduction = (points) => {
+const buildStdSeriesFromAllFiles = (points) => {
   const samplesByDistance = new Map();
 
   points.forEach((point) => {
@@ -399,56 +556,65 @@ const applyStdNoiseReduction = (points) => {
       return;
     }
 
-    const key = point.distance.toFixed(3);
+    const key = point.distance.toFixed(6);
     if (!samplesByDistance.has(key)) {
-      samplesByDistance.set(key, []);
+      samplesByDistance.set(key, {
+        distance: point.distance,
+        values: [],
+      });
     }
-    samplesByDistance.get(key).push(point.temperature);
+    samplesByDistance.get(key).values.push(point.temperature);
   });
 
-  const statsByDistance = new Map();
-  samplesByDistance.forEach((samples, key) => {
-    if (samples.length < 2) {
-      return;
-    }
+  return Array.from(samplesByDistance.values())
+    .map((entry) => {
+      const n = entry.values.length;
+      if (n === 0) {
+        return null;
+      }
 
-    const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
-    const variance =
-      samples.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
-      samples.length;
-    const stdDev = Math.sqrt(variance);
+      const mean = entry.values.reduce((sum, value) => sum + value, 0) / n;
+      const variance =
+        entry.values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / n;
+      const stdDev = Math.sqrt(variance);
 
-    statsByDistance.set(key, { mean, stdDev });
-  });
+      return {
+        distance: entry.distance,
+        temperature: stdDev,
+        fileId: "std_sigma",
+        meanValue: mean,
+        rawValues: entry.values,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.distance - b.distance);
+};
 
-  return points.map((point) => {
+const buildStdSeriesFromDifferentialPoints = (points) =>
+  points.map((point) => {
+    const previousValue = Number(point.previousValue);
+    const latestValue = Number(point.latestValue);
     if (
-      point.temperature == null ||
-      Number.isNaN(point.temperature) ||
-      !Number.isFinite(point.distance)
+      !Number.isFinite(point?.distance) ||
+      !Number.isFinite(previousValue) ||
+      !Number.isFinite(latestValue)
     ) {
       return point;
     }
 
-    const key = point.distance.toFixed(3);
-    const stats = statsByDistance.get(key);
-    if (!stats || !Number.isFinite(stats.stdDev) || stats.stdDev === 0) {
-      return point;
-    }
-
-    const lower = stats.mean - stats.stdDev;
-    const upper = stats.mean + stats.stdDev;
-    const filtered = Math.min(upper, Math.max(lower, point.temperature));
-    if (Math.abs(filtered - point.temperature) < 0.000001) {
-      return point;
-    }
+    const values = [previousValue, latestValue];
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance =
+      values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+    const stdDev = Math.sqrt(variance);
 
     return {
       ...point,
-      temperature: Number(filtered.toFixed(3)),
+      temperature: stdDev,
+      meanValue: mean,
+      rawValues: values,
     };
   });
-};
 
 const loadCachedThresholds = () => {
   if (typeof window === "undefined") {
@@ -474,6 +640,7 @@ const LimitsView = () => {
   const [channel, setChannel] = useState(DEFAULT_CHANNEL);
   const [rangeMode, setRangeMode] = useState(DEFAULT_RANGE_MODE);
   const [noiseMode, setNoiseMode] = useState(NOISE_MODES.raw);
+  const [diffNoiseEnabled, setDiffNoiseEnabled] = useState(true);
   const [data, setData] = useState([]);
   const [latestFileId, setLatestFileId] = useState(null);
   const [comparisonInfo, setComparisonInfo] = useState(EMPTY_COMPARISON_INFO);
@@ -481,10 +648,13 @@ const LimitsView = () => {
   const [manualReading2, setManualReading2] = useState("");
   const [fileVisibility, setFileVisibility] = useState({});
   const [hideUnselected, setHideUnselected] = useState(false);
+  const [thresholdMode, setThresholdMode] = useState(DEFAULT_THRESHOLD_MODE);
+  const [thresholdName, setThresholdName] = useState("");
   const [thresholdInput, setThresholdInput] = useState(DEFAULT_THRESHOLD_INPUT);
   const [thresholdColor, setThresholdColor] = useState(THRESHOLD_COLORS[0]);
   const [thresholdSoundEnabled, setThresholdSoundEnabled] = useState(false);
   const [thresholdLevels, setThresholdLevels] = useState(loadCachedThresholds);
+  const [thresholdsHydrated, setThresholdsHydrated] = useState(false);
   const [alerts, setAlerts] = useState([]);
   const [alertsPanelOpen, setAlertsPanelOpen] = useState(true);
   const [soundPanelOpen, setSoundPanelOpen] = useState(true);
@@ -557,9 +727,12 @@ const LimitsView = () => {
   );
 
   const currentTypeParam = chartType === "tension" ? "str" : "tem";
+  const currentChannelId = CHANNELS[channel]?.id || CHANNELS[DEFAULT_CHANNEL].id;
   const isManualDifferentialView = viewMode === VIEW_MODES.manualDiff;
   const isDifferentialView =
     viewMode === VIEW_MODES.diff2 || isManualDifferentialView;
+  const isStdCompareMode =
+    !isDifferentialView && noiseMode === NOISE_MODES.std;
 
   const applyChartRange = useCallback((range) => {
     const yMin = range.yMin ?? DEFAULT_RANGE.yMin;
@@ -581,14 +754,20 @@ const LimitsView = () => {
   }, []);
 
   const processedData = useMemo(() => {
-    if (isDifferentialView) {
-      return data;
+    if (!Array.isArray(data) || data.length === 0) {
+      return [];
     }
-    if (noiseMode === NOISE_MODES.std) {
-      return applyStdNoiseReduction(data);
+
+    if (isDifferentialView) {
+      return diffNoiseEnabled
+        ? buildStdSeriesFromDifferentialPoints(data)
+        : data;
+    }
+    if (isStdCompareMode) {
+      return buildStdSeriesFromAllFiles(data);
     }
     return data;
-  }, [data, isDifferentialView, noiseMode]);
+  }, [data, diffNoiseEnabled, isDifferentialView, isStdCompareMode]);
 
   const visibleData = useMemo(() => {
     if (processedData.length === 0) {
@@ -627,6 +806,16 @@ const LimitsView = () => {
     return Array.from(ids);
   }, [data]);
 
+  const processedFileIds = useMemo(() => {
+    const ids = new Set();
+    processedData.forEach((point) => {
+      if (point.fileId) {
+        ids.add(point.fileId);
+      }
+    });
+    return Array.from(ids);
+  }, [processedData]);
+
   const activeFileIds = useMemo(
     () => fileIds.filter((id) => fileVisibility[id] !== false),
     [fileIds, fileVisibility]
@@ -636,30 +825,81 @@ const LimitsView = () => {
     if (isDifferentialView) {
       return fileIds[0] || null;
     }
+    if (isStdCompareMode) {
+      return processedFileIds[0] || null;
+    }
     if (activeFileIds.length > 0) {
       return activeFileIds[activeFileIds.length - 1];
     }
 
     return latestFileId || fileIds[fileIds.length - 1] || null;
-  }, [activeFileIds, fileIds, isDifferentialView, latestFileId]);
+  }, [
+    activeFileIds,
+    fileIds,
+    isDifferentialView,
+    isStdCompareMode,
+    latestFileId,
+    processedFileIds,
+  ]);
 
   const activeReferenceIndex = useMemo(() => {
     if (isDifferentialView) {
       return null;
     }
+    if (isStdCompareMode) {
+      return "Sigma";
+    }
     const index = fileIds.findIndex((id) => id === activeReferenceFileId);
     return index >= 0 ? index + 1 : null;
-  }, [activeReferenceFileId, fileIds, isDifferentialView]);
+  }, [activeReferenceFileId, fileIds, isDifferentialView, isStdCompareMode]);
 
   const sortedThresholdLevels = useMemo(
     () =>
       [...thresholdLevels].sort((a, b) => {
-        if (a.percent !== b.percent) {
-          return a.percent - b.percent;
+        const modeA =
+          a.mode === THRESHOLD_MODES.offset
+            ? THRESHOLD_MODES.offset
+            : THRESHOLD_MODES.percent;
+        const modeB =
+          b.mode === THRESHOLD_MODES.offset
+            ? THRESHOLD_MODES.offset
+            : THRESHOLD_MODES.percent;
+
+        if (modeA !== modeB) {
+          return modeA.localeCompare(modeB);
         }
+
+        const valueA =
+          modeA === THRESHOLD_MODES.offset
+            ? Number(a.offsetValue)
+            : Number(a.percent);
+        const valueB =
+          modeB === THRESHOLD_MODES.offset
+            ? Number(b.offsetValue)
+            : Number(b.percent);
+
+        if (
+          Number.isFinite(valueA) &&
+          Number.isFinite(valueB) &&
+          valueA !== valueB
+        ) {
+          return valueA - valueB;
+        }
+
         return String(a.id).localeCompare(String(b.id));
       }),
     [thresholdLevels]
+  );
+
+  const activeThresholdLevels = useMemo(
+    () =>
+      sortedThresholdLevels.filter((level) => {
+        const levelChannelId = String(
+          level.channelId || CHANNELS[DEFAULT_CHANNEL].id
+        );
+        return level.type === currentTypeParam && levelChannelId === currentChannelId;
+      }),
+    [currentChannelId, currentTypeParam, sortedThresholdLevels]
   );
 
   const visibleThresholdSeries = useMemo(() => {
@@ -673,35 +913,49 @@ const LimitsView = () => {
     const minVisible = currentXMin - buffer;
     const maxVisible = currentXMax + buffer;
 
-    return sortedThresholdLevels
-      .filter((level) => level.type === currentTypeParam)
+    return activeThresholdLevels
       .map((level) => ({
         ...level,
         points: level.points.filter(
           (point) => point.distance >= minVisible && point.distance <= maxVisible
         ),
       }));
-  }, [currentTypeParam, isDifferentialView, sortedThresholdLevels, xDomain]);
+  }, [activeThresholdLevels, isDifferentialView, xDomain]);
 
   const soundThresholdCount = useMemo(
-    () => thresholdLevels.filter((level) => level.soundEnabled).length,
-    [thresholdLevels]
+    () => activeThresholdLevels.filter((level) => level.soundEnabled).length,
+    [activeThresholdLevels]
   );
 
   const syncPayload = useMemo(
     () =>
-      thresholdLevels.map((level) => ({
+      thresholdLevels.map((level) => {
+        const mode =
+          level.mode === THRESHOLD_MODES.offset
+            ? THRESHOLD_MODES.offset
+            : THRESHOLD_MODES.percent;
+
+        return {
         id: level.id,
-        percent: level.percent,
+        percent: mode === THRESHOLD_MODES.percent ? level.percent : null,
+        offsetValue:
+          mode === THRESHOLD_MODES.offset
+            ? Number(level.offsetValue)
+            : Number.isFinite(Number(level.offsetValue))
+              ? Number(level.offsetValue)
+              : null,
         floor: level.floor,
         color: level.color,
         sourceFileId: level.sourceFileId,
         sourceFileIndex: level.sourceFileIndex,
         soundEnabled: level.soundEnabled,
+        channelId: String(level.channelId || CHANNELS[DEFAULT_CHANNEL].id),
         type: level.type,
+        mode,
         thresholdLabel: level.thresholdLabel,
         points: level.points,
-      })),
+      };
+      }),
     [thresholdLevels]
   );
 
@@ -711,6 +965,7 @@ const LimitsView = () => {
       const selectedFileSet = new Set(
         fileIds.filter((id) => fileVisibility[id] !== false)
       );
+      const shouldApplyVisibilityFilter = hideUnselected && !isStdCompareMode;
 
       let minY = Number.POSITIVE_INFINITY;
       let maxY = Number.NEGATIVE_INFINITY;
@@ -722,7 +977,11 @@ const LimitsView = () => {
         if (point.distance < minX || point.distance > maxX) {
           return;
         }
-        if (hideUnselected && point.fileId && !selectedFileSet.has(point.fileId)) {
+        if (
+          shouldApplyVisibilityFilter &&
+          point.fileId &&
+          !selectedFileSet.has(point.fileId)
+        ) {
           return;
         }
 
@@ -732,7 +991,14 @@ const LimitsView = () => {
 
       if (!isDifferentialView) {
         thresholdLevels.forEach((level) => {
-          if (level.type !== currentTypeParam || !Array.isArray(level.points)) {
+          const levelChannelId = String(
+            level.channelId || CHANNELS[DEFAULT_CHANNEL].id
+          );
+          if (
+            level.type !== currentTypeParam ||
+            levelChannelId !== currentChannelId ||
+            !Array.isArray(level.points)
+          ) {
             return;
           }
 
@@ -757,6 +1023,7 @@ const LimitsView = () => {
       return [Number((minY - padding).toFixed(3)), Number((maxY + padding).toFixed(3))];
     },
     [
+      currentChannelId,
       currentTypeParam,
       processedData,
       fileIds,
@@ -765,6 +1032,7 @@ const LimitsView = () => {
       initialStats.yMax,
       initialStats.yMin,
       isDifferentialView,
+      isStdCompareMode,
       thresholdLevels,
     ]
   );
@@ -1009,6 +1277,54 @@ const LimitsView = () => {
   }, [computeYDomainForRange, xDomain]);
 
   useEffect(() => {
+    let isDisposed = false;
+
+    const loadThresholdsFromServer = async () => {
+      try {
+        const response = await fetch(`${getApiBase()}/api/thresholds`, {
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`status ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (isDisposed) {
+          return;
+        }
+
+        const serverThresholds = Array.isArray(payload?.thresholds)
+          ? payload.thresholds
+          : [];
+        setThresholdLevels(serverThresholds);
+
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(
+            THRESHOLD_CACHE_KEY,
+            JSON.stringify(serverThresholds)
+          );
+        }
+      } catch (error) {
+        console.error("Error cargando umbrales desde backend", error);
+      } finally {
+        if (!isDisposed) {
+          setThresholdsHydrated(true);
+        }
+      }
+    };
+
+    void loadThresholdsFromServer();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, [getApiBase]);
+
+  useEffect(() => {
+    if (!thresholdsHydrated) {
+      return;
+    }
+
     const syncThresholds = async () => {
       try {
         await fetch(`${getApiBase()}/api/thresholds`, {
@@ -1026,7 +1342,7 @@ const LimitsView = () => {
     };
 
     void syncThresholds();
-  }, [getApiBase, syncPayload]);
+  }, [getApiBase, syncPayload, thresholdsHydrated]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1172,6 +1488,15 @@ const LimitsView = () => {
     }
   };
 
+  const handleThresholdModeChange = (value) => {
+    if (
+      value === THRESHOLD_MODES.percent ||
+      value === THRESHOLD_MODES.offset
+    ) {
+      setThresholdMode(value);
+    }
+  };
+
   const handleDownloadDifferentialExcel = () => {
     if (
       typeof window === "undefined" ||
@@ -1214,6 +1539,53 @@ const LimitsView = () => {
     window.URL.revokeObjectURL(url);
   };
 
+  const handleDownloadStdExcel = () => {
+    if (
+      typeof window === "undefined" ||
+      !isStdCompareMode ||
+      fileIds.length === 0 ||
+      processedData.length === 0
+    ) {
+      return;
+    }
+
+    const channelLabel = CHANNELS[channel]?.label || CHANNELS[DEFAULT_CHANNEL].label;
+    const chartLabel = CHART_TYPES[chartType]?.label || CHART_TYPES.tension.label;
+    const rows = buildStdExportRows({
+      rawPoints: data,
+      stdPoints: processedData,
+      fileIds,
+    });
+
+    if (rows.length === 0) {
+      return;
+    }
+
+    const workbookXml = buildStdWorkbookXml({
+      channelLabel,
+      chartLabel,
+      fileIds,
+      rows,
+    });
+    const blob = new Blob([workbookXml], {
+      type: "application/vnd.ms-excel;charset=utf-8;",
+    });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const safeType = chartType === "temperatura" ? "temperatura" : "tension";
+    const safeChannel = (channelLabel || "canal")
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/gi, "_")
+      .replace(/^_+|_+$/g, "");
+
+    link.href = url;
+    link.download = `desviacion_estandar_${safeChannel}_${safeType}.xls`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  };
+
   const handleManualReading1Change = (event) => {
     setManualReading1(event.target.value);
   };
@@ -1236,6 +1608,11 @@ const LimitsView = () => {
       return;
     }
 
+    const selectedMode =
+      thresholdMode === THRESHOLD_MODES.offset
+        ? THRESHOLD_MODES.offset
+        : THRESHOLD_MODES.percent;
+
     const referencePoints = processedData
       .filter(
         (point) =>
@@ -1245,7 +1622,10 @@ const LimitsView = () => {
       )
       .map((point) => ({
         distance: point.distance,
-        thresholdValue: getThresholdValue(point.temperature, parsed),
+        thresholdValue:
+          selectedMode === THRESHOLD_MODES.offset
+            ? getThresholdValueWithOffset(point.temperature, parsed)
+            : getThresholdValue(point.temperature, parsed),
       }))
       .filter((point) => Number.isFinite(point.thresholdValue));
 
@@ -1253,10 +1633,21 @@ const LimitsView = () => {
       return;
     }
 
-    const normalizedPercent = Number(parsed.toFixed(1));
+    const normalizedPercent =
+      selectedMode === THRESHOLD_MODES.percent
+        ? Number(parsed.toFixed(1))
+        : null;
+    const normalizedOffset =
+      selectedMode === THRESHOLD_MODES.offset ? Number(parsed.toFixed(3)) : null;
+    const normalizedName = thresholdName.trim();
     const alreadyExists = thresholdLevels.some(
       (level) =>
-        level.percent === normalizedPercent &&
+        String(level.channelId || CHANNELS[DEFAULT_CHANNEL].id) ===
+          currentChannelId &&
+        (level.mode || THRESHOLD_MODES.percent) === selectedMode &&
+        (selectedMode === THRESHOLD_MODES.percent
+          ? Number(level.percent) === normalizedPercent
+          : Number(level.offsetValue) === normalizedOffset) &&
         level.sourceFileId === sourceFileId &&
         level.type === currentTypeParam
     );
@@ -1273,17 +1664,28 @@ const LimitsView = () => {
       {
         id: uniqueKey,
         percent: normalizedPercent,
-        floor: Number(getThresholdFloor(normalizedPercent).toFixed(2)),
+        offsetValue: normalizedOffset,
+        mode: selectedMode,
+        floor:
+          selectedMode === THRESHOLD_MODES.percent
+            ? Number(getThresholdFloor(normalizedPercent).toFixed(2))
+            : 0,
         color: thresholdColor,
         sourceFileId,
         sourceFileIndex: activeReferenceIndex,
         soundEnabled: thresholdSoundEnabled,
+        channelId: currentChannelId,
         type: currentTypeParam,
-        thresholdLabel: `Umbral al ${normalizedPercent.toFixed(1)}%`,
+        thresholdLabel:
+          normalizedName ||
+          (selectedMode === THRESHOLD_MODES.percent
+            ? `Umbral al ${normalizedPercent.toFixed(1)}%`
+            : `Umbral +${normalizedOffset.toFixed(3)}`),
         points: referencePoints,
       },
     ]);
 
+    setThresholdName("");
     setThresholdColor(nextPaletteColor);
     if (thresholdSoundEnabled) {
       void ensureAudioContext();
@@ -1497,9 +1899,20 @@ const LimitsView = () => {
             <option value={RANGE_MODES.section2}>Tramo 2</option>
           </select>
         </div>
+        {isDifferentialView && (
+          <label className="flex items-center gap-2 text-xs text-slate-600 whitespace-nowrap">
+            <input
+              type="checkbox"
+              className="accent-blue-600"
+              checked={diffNoiseEnabled}
+              onChange={(event) => setDiffNoiseEnabled(event.target.checked)}
+            />
+            Aplicar DE en diferencial
+          </label>
+        )}
         {!isDifferentialView && (
           <div className="flex items-center gap-2">
-            <span className="text-sm text-slate-600">Ruido:</span>
+            <span className="text-sm text-slate-600">Filtro:</span>
             <select
               value={noiseMode}
               onChange={handleNoiseModeChange}
@@ -1752,7 +2165,7 @@ const LimitsView = () => {
             </div>
           )}
 
-          {!isDifferentialView && fileIds.length > 0 && (
+          {!isDifferentialView && !isStdCompareMode && fileIds.length > 0 && (
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex flex-wrap gap-2">
                 {fileIds.map((fileId, index) => {
@@ -1789,6 +2202,26 @@ const LimitsView = () => {
               </label>
             </div>
           )}
+          {!isDifferentialView && isStdCompareMode && fileIds.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="text-xs text-slate-600">
+                Modo DE activo: sigma calculada con todas las lecturas (N ={" "}
+                <span className="font-semibold text-slate-700">{fileIds.length}</span>
+                ).
+              </div>
+              <button
+                onClick={handleDownloadStdExcel}
+                disabled={processedData.length === 0}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                  processedData.length > 0
+                    ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                    : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                }`}
+              >
+                Descargar Excel DE
+              </button>
+            </div>
+          )}
 
           <LimitsChart
             hasData={data.length > 0}
@@ -1796,6 +2229,8 @@ const LimitsView = () => {
             lineColor={CHANNELS[channel]?.color || CHANNELS[DEFAULT_CHANNEL].color}
             chartType={chartType}
             viewMode={viewMode}
+            noiseMode={noiseMode}
+            diffNoiseEnabled={diffNoiseEnabled}
             latestFileId={latestFileId}
             fileIds={fileIds}
             fileVisibility={fileVisibility}
@@ -1816,6 +2251,10 @@ const LimitsView = () => {
 
         {!isDifferentialView && (
           <ControlPanel
+            thresholdMode={thresholdMode}
+            onThresholdModeChange={handleThresholdModeChange}
+            thresholdName={thresholdName}
+            onThresholdNameChange={setThresholdName}
             thresholdInput={thresholdInput}
             onThresholdInputChange={setThresholdInput}
             thresholdColor={thresholdColor}
@@ -1824,10 +2263,8 @@ const LimitsView = () => {
             onThresholdSoundEnabledChange={setThresholdSoundEnabled}
             onThresholdInputKeyDown={handleThresholdInputKeyDown}
             onAddThreshold={handleAddThreshold}
-            thresholdLevels={sortedThresholdLevels}
+            thresholdLevels={activeThresholdLevels}
             onRemoveThreshold={handleRemoveThreshold}
-            activeReferenceIndex={activeReferenceIndex}
-            selectedFileCount={activeFileIds.length}
           />
         )}
       </div>

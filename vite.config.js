@@ -3,7 +3,11 @@ import { fileURLToPath } from "url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { CHANNEL_DIRS, handleCh1ApiRequest } from "./ch1-data-service.js";
+import {
+  CHANNEL_DIRS,
+  handleFiberMonitorApiRequest,
+} from "./fiber-monitor-service.js";
+import { readRequestBody } from "./http-body-utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,24 +16,12 @@ const DATA_ROOT = path.resolve(__dirname, "src", "Fibra Exportada");
 const ROOT_DIR = path.resolve(__dirname);
 const CWD_DIR = path.resolve(process.cwd());
 
-const readRequestBody = (req) =>
-  new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => {
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      resolve(Buffer.concat(chunks).toString("utf-8"));
-    });
-    req.on("error", reject);
-  });
-
 const buildDataMiddleware = () => {
   return async (req, res, next) => {
     const urlString = req.originalUrl || req.url || "";
     const bodyText = req.method === "POST" ? await readRequestBody(req) : "";
 
-    const result = await handleCh1ApiRequest({
+    const result = await handleFiberMonitorApiRequest({
       method: req.method,
       urlString,
       host: "localhost",
@@ -55,10 +47,10 @@ const buildDataMiddleware = () => {
   };
 };
 
-const ch1ApiPlugin = () => {
+const fiberMonitorApiPlugin = () => {
   const middleware = buildDataMiddleware();
   return {
-    name: "ch1-api-middleware",
+    name: "fiber-monitor-api-middleware",
     enforce: "pre",
     configureServer(server) {
       server.middlewares.use(middleware);
@@ -70,7 +62,7 @@ const ch1ApiPlugin = () => {
 };
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), ch1ApiPlugin()],
+  plugins: [react(), tailwindcss(), fiberMonitorApiPlugin()],
   server: {
     host: true,
     allowedHosts: "all",
