@@ -12,7 +12,10 @@ import { readRequestBody } from "./http-body-utils.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DATA_ROOT = path.resolve(__dirname, "src", "Fibra Exportada");
+const DATA_ROOT = path.resolve(
+  process.env.FIBER_MONITOR_DATA_ROOT ||
+    path.join(__dirname, "src", "Fibra Exportada")
+);
 const ROOT_DIR = path.resolve(__dirname);
 const CWD_DIR = path.resolve(process.cwd());
 

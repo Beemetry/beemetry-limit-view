@@ -2,6 +2,12 @@ import { watch, readFileSync } from "fs";
 import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+  getModbusPublisherStatus,
+  publishModbusPeakEvent,
+  startModbusEventPublisherFromEnv,
+  stopModbusEventPublisher,
+} from "./modbus-event-publisher.js";
 
 export const API_PATHNAME = "/api/ch1-data";
 export const MONITOR_STATE_PATHNAME = "/api/monitor-state";
@@ -60,6 +66,14 @@ const TIMESTAMP_IN_NAME_REGEX = /(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)/;
 const ALERT_HISTORY_LIMIT = 100;
 const WATCH_DEBOUNCE_MS = 400;
 const ALERT_KEY_PERSIST_DEBOUNCE_MS = 300;
+const MODBUS_EVENT_PEAK_SNAPSHOT_LIMIT = Math.max(
+  1,
+  Math.min(
+    500,
+    Number.parseInt(process.env.MODBUS_EVENT_PEAK_SNAPSHOT_LIMIT || "80", 10) ||
+      80
+  )
+);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PERSISTENCE_DIR = path.join(__dirname, "runtime-data");
@@ -653,6 +667,7 @@ const evaluateThresholdsForFile = async ({
     }
 
     let maxHit = null;
+    const exceededPoints = [];
     for (const point of filePoints) {
       const thresholdValue = threshold.lookup.get(
         normalizeDistanceKey(point.distance)
@@ -663,6 +678,12 @@ const evaluateThresholdsForFile = async ({
 
       if (point.temperature > thresholdValue) {
         const delta = point.temperature - thresholdValue;
+        exceededPoints.push({
+          distance: point.distance,
+          measuredValue: point.temperature,
+          thresholdValue,
+          delta,
+        });
         if (!maxHit || delta > maxHit.delta) {
           maxHit = {
             distance: point.distance,
@@ -677,6 +698,13 @@ const evaluateThresholdsForFile = async ({
     if (!maxHit) {
       return;
     }
+
+    const peakDistances = exceededPoints
+      .slice()
+      .sort((a, b) => b.delta - a.delta)
+      .slice(0, MODBUS_EVENT_PEAK_SNAPSHOT_LIMIT)
+      .map((entry) => Number(entry.distance.toFixed(3)))
+      .sort((a, b) => a - b);
 
     monitorStore.triggeredAlertKeys.add(alertKey);
     schedulePersistTriggeredAlertKeys();
@@ -703,6 +731,16 @@ const evaluateThresholdsForFile = async ({
     };
 
     pushAlert(alert);
+    publishModbusPeakEvent({
+      channel,
+      type,
+      fileId: filename,
+      createdAt: alert.createdAt,
+      thresholdName: threshold.thresholdLabel,
+      peakDistances,
+      measuredValue: alert.measuredValue,
+      thresholdValue: alert.thresholdValue,
+    });
     void sendTelegramAlert(alert.message);
   });
 };
@@ -762,7 +800,8 @@ const scheduleWatchedFile = ({ dataRoot, channel, filename }) => {
   monitorStore.watchTimers.set(timerKey, timer);
 };
 
-const ensureMonitorStarted = (dataRoot) => {
+const ensureMonitorStarted = async (dataRoot) => {
+  await startModbusEventPublisherFromEnv();
   if (monitorStore.watchersStarted) {
     return;
   }
@@ -797,7 +836,45 @@ const getMonitorStatePayload = () => ({
   versions: monitorStore.versions,
   alerts: monitorStore.alerts.map(sanitizeAlertForClient),
   thresholdCount: monitorStore.thresholds.length,
+  modbus: getModbusPublisherStatus(),
 });
+
+export const initializeFiberMonitorRuntime = async ({ dataRoot }) => {
+  await ensureStateReady();
+  await ensureMonitorStarted(dataRoot);
+  return {
+    thresholdCount: monitorStore.thresholds.length,
+    modbus: getModbusPublisherStatus(),
+  };
+};
+
+export const shutdownFiberMonitorRuntime = async () => {
+  monitorStore.watchTimers.forEach((timer) => clearTimeout(timer));
+  monitorStore.watchTimers.clear();
+
+  monitorStore.watcherClosers.forEach((closeWatcher) => {
+    try {
+      closeWatcher();
+    } catch {
+      // ignore watcher close failures on shutdown
+    }
+  });
+  monitorStore.watcherClosers = [];
+  monitorStore.watchersStarted = false;
+
+  if (monitorStore.persistAlertKeysTimer) {
+    clearTimeout(monitorStore.persistAlertKeysTimer);
+    monitorStore.persistAlertKeysTimer = null;
+  }
+
+  try {
+    await persistTriggeredAlertKeysToDisk();
+  } catch (error) {
+    console.error("Persist alert keys on shutdown failed", error);
+  }
+
+  await stopModbusEventPublisher();
+};
 
 export const readFiberChannelData = async ({
   dataRoot,
@@ -811,7 +888,7 @@ export const readFiberChannelData = async ({
   logger = null,
 }) => {
   await ensureStateReady();
-  ensureMonitorStarted(dataRoot);
+  await ensureMonitorStarted(dataRoot);
 
   const channelDir = CHANNEL_DIRS[channel];
   if (!channelDir) {
@@ -873,7 +950,7 @@ export const handleFiberMonitorApiRequest = async ({
   bodyText = "",
 }) => {
   await ensureStateReady();
-  ensureMonitorStarted(dataRoot);
+  await ensureMonitorStarted(dataRoot);
 
   const url = new URL(urlString, `http://${host}`);
 
