@@ -4,6 +4,8 @@ import { Plus, Trash2 } from "lucide-react";
 const ControlPanel = ({
   thresholdMode,
   onThresholdModeChange,
+  thresholdDirection,
+  onThresholdDirectionChange,
   thresholdName,
   onThresholdNameChange,
   thresholdInput,
@@ -61,6 +63,20 @@ const ControlPanel = ({
               >
                 <option value="percent">Porcentaje</option>
                 <option value="offset">Sumatoria (+)</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                Direccion
+              </label>
+              <select
+                className="w-full text-sm px-3 py-2 rounded border border-slate-200 bg-white"
+                value={thresholdDirection}
+                onChange={(event) => onThresholdDirectionChange(event.target.value)}
+              >
+                <option value="up">Alta ( &gt; )</option>
+                <option value="down">Baja ( &lt; )</option>
               </select>
             </div>
 
@@ -158,6 +174,7 @@ const ControlPanel = ({
                       <div className="text-slate-400">
                         Canal #{level.channelId || "--"} |{" "}
                         {level.type === "str" ? "Tension" : "Temperatura"} |{" "}
+                        {level.direction === "down" ? "Baja" : "Alta"} |{" "}
                         Base: lectura #{level.sourceFileIndex ?? "--"}
                         {level.soundEnabled ? " | sonido" : ""}
                       </div>

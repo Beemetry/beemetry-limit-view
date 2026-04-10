@@ -4,7 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import {
   getModbusPublisherStatus,
-  publishModbusPeakEvent,
+  loadModbusAlarmBatch,
   startModbusEventPublisherFromEnv,
   stopModbusEventPublisher,
 } from "./modbus-event-publisher.js";
@@ -66,12 +66,16 @@ const TIMESTAMP_IN_NAME_REGEX = /(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)/;
 const ALERT_HISTORY_LIMIT = 100;
 const WATCH_DEBOUNCE_MS = 400;
 const ALERT_KEY_PERSIST_DEBOUNCE_MS = 300;
-const MODBUS_EVENT_PEAK_SNAPSHOT_LIMIT = Math.max(
+const MODBUS_EVENT_RANGE_SNAPSHOT_LIMIT = Math.max(
   1,
   Math.min(
     500,
-    Number.parseInt(process.env.MODBUS_EVENT_PEAK_SNAPSHOT_LIMIT || "80", 10) ||
-      80
+    Number.parseInt(
+      process.env.MODBUS_EVENT_RANGE_SNAPSHOT_LIMIT ||
+        process.env.MODBUS_EVENT_PEAK_SNAPSHOT_LIMIT ||
+        "80",
+      10
+    ) || 80
   )
 );
 const __filename = fileURLToPath(import.meta.url);
@@ -144,6 +148,7 @@ const getMonitorKey = (channel, type) => `${channel}:${type}`;
 const DEFAULT_THRESHOLD_CHANNEL_ID = "1";
 
 const normalizeDistanceKey = (value) => Number(value).toFixed(3);
+const toFixed3 = (value) => Number(Number(value).toFixed(3));
 
 const getFileTypeFromName = (filename) => {
   if (!filename || !filename.endsWith(".txt")) {
@@ -428,6 +433,7 @@ const sanitizeAlertForClient = (alert) => ({
   id: alert.id,
   channel: alert.channel,
   type: alert.type,
+  direction: alert.direction,
   thresholdMode: alert.thresholdMode,
   thresholdOffset: alert.thresholdOffset,
   fileId: alert.fileId,
@@ -437,6 +443,13 @@ const sanitizeAlertForClient = (alert) => ({
   measuredValue: alert.measuredValue,
   thresholdValue: alert.thresholdValue,
   distance: alert.distance,
+  segmentCount: alert.segmentCount,
+  segments: Array.isArray(alert.segments)
+    ? alert.segments.map((segment) => ({
+        startDistance: segment.startDistance,
+        endDistance: segment.endDistance,
+      }))
+    : [],
   createdAt: alert.createdAt,
   soundEnabled: alert.soundEnabled,
   message: alert.message,
@@ -458,6 +471,7 @@ const normalizeThreshold = (item) => {
   const type = item?.type === "str" ? "str" : item?.type === "tem" ? "tem" : null;
   const channelId = String(item?.channelId || DEFAULT_THRESHOLD_CHANNEL_ID);
   const mode = item?.mode === "offset" ? "offset" : "percent";
+  const direction = item?.direction === "down" ? "down" : "up";
   const percent = Number(item?.percent);
   const offsetValue = Number(item?.offsetValue);
   const floor = Number(item?.floor);
@@ -507,6 +521,7 @@ const normalizeThreshold = (item) => {
         : mode === "percent"
           ? `Umbral al ${Number(percent).toFixed(1)}%`
           : `Umbral +${Number(offsetValue).toFixed(3)}`,
+    direction,
     lookup: buildThresholdLookup(points),
   };
 };
@@ -524,6 +539,7 @@ const serializeThreshold = (threshold) => ({
   sourceFileIndex: threshold.sourceFileIndex,
   soundEnabled: threshold.soundEnabled,
   thresholdLabel: threshold.thresholdLabel,
+  direction: threshold.direction,
   points: threshold.points.map((point) => ({
     distance: point.distance,
     thresholdValue: point.thresholdValue,
@@ -633,6 +649,78 @@ const setThresholds = (thresholds) => {
   pruneTriggeredAlertKeys();
 };
 
+const buildExceededRangesByThreshold = ({ filePoints, lookup, direction }) => {
+  const isLowerDirection = direction === "down";
+  const ranges = [];
+  let activeRange = null;
+
+  for (const point of filePoints) {
+    const thresholdValue = lookup.get(normalizeDistanceKey(point.distance));
+    if (!Number.isFinite(thresholdValue)) {
+      if (activeRange) {
+        ranges.push(activeRange);
+        activeRange = null;
+      }
+      continue;
+    }
+
+    const measuredValue = Number(point.temperature);
+    const exceeded = isLowerDirection
+      ? measuredValue < thresholdValue
+      : measuredValue > thresholdValue;
+    if (!exceeded) {
+      if (activeRange) {
+        ranges.push(activeRange);
+        activeRange = null;
+      }
+      continue;
+    }
+
+    const delta = isLowerDirection
+      ? thresholdValue - measuredValue
+      : measuredValue - thresholdValue;
+    if (!activeRange) {
+      activeRange = {
+        startDistance: point.distance,
+        endDistance: point.distance,
+        maxDelta: delta,
+        peakDistance: point.distance,
+        peakMeasuredValue: measuredValue,
+        peakThresholdValue: thresholdValue,
+        valueMin: measuredValue,
+        valueMax: measuredValue,
+      };
+      continue;
+    }
+
+    activeRange.endDistance = point.distance;
+    activeRange.valueMin = Math.min(activeRange.valueMin, measuredValue);
+    activeRange.valueMax = Math.max(activeRange.valueMax, measuredValue);
+    if (delta > activeRange.maxDelta) {
+      activeRange.maxDelta = delta;
+      activeRange.peakDistance = point.distance;
+      activeRange.peakMeasuredValue = measuredValue;
+      activeRange.peakThresholdValue = thresholdValue;
+    }
+  }
+
+  if (activeRange) {
+    ranges.push(activeRange);
+  }
+
+  return ranges;
+};
+
+const resolveAlarmTypeCode = ({ variableType, direction }) => {
+  if (variableType === "tem") {
+    return direction === "down" ? 2 : 1;
+  }
+  return direction === "down" ? 4 : 3;
+};
+
+const toDistanceDm = (distanceMeters) =>
+  Math.max(0, Math.min(0xffff, Math.round(Number(distanceMeters) * 10)));
+
 const evaluateThresholdsForFile = async ({
   dataRoot,
   channel,
@@ -660,51 +748,42 @@ const evaluateThresholdsForFile = async ({
     return;
   }
 
+  const modbusAlarmCandidates = [];
+  const detectedAt = new Date().toISOString();
+
   matchingThresholds.forEach((threshold) => {
     const alertKey = `${channel}:${type}:${filename}:${threshold.id}`;
     if (monitorStore.triggeredAlertKeys.has(alertKey)) {
       return;
     }
 
-    let maxHit = null;
-    const exceededPoints = [];
-    for (const point of filePoints) {
-      const thresholdValue = threshold.lookup.get(
-        normalizeDistanceKey(point.distance)
-      );
-      if (!Number.isFinite(thresholdValue)) {
-        continue;
-      }
+    const exceededRanges = buildExceededRangesByThreshold({
+      filePoints,
+      lookup: threshold.lookup,
+      direction: threshold.direction,
+    });
 
-      if (point.temperature > thresholdValue) {
-        const delta = point.temperature - thresholdValue;
-        exceededPoints.push({
-          distance: point.distance,
-          measuredValue: point.temperature,
-          thresholdValue,
-          delta,
-        });
-        if (!maxHit || delta > maxHit.delta) {
-          maxHit = {
-            distance: point.distance,
-            measuredValue: point.temperature,
-            thresholdValue,
-            delta,
-          };
-        }
-      }
-    }
-
-    if (!maxHit) {
+    if (exceededRanges.length === 0) {
       return;
     }
 
-    const peakDistances = exceededPoints
+    const sortedRanges = exceededRanges
       .slice()
-      .sort((a, b) => b.delta - a.delta)
-      .slice(0, MODBUS_EVENT_PEAK_SNAPSHOT_LIMIT)
-      .map((entry) => Number(entry.distance.toFixed(3)))
-      .sort((a, b) => a - b);
+      .sort((left, right) => right.maxDelta - left.maxDelta);
+    const maxHit = sortedRanges[0];
+
+    const rangeSnapshots = sortedRanges
+      .slice(0, MODBUS_EVENT_RANGE_SNAPSHOT_LIMIT)
+      .map((item) => ({
+        startDistance: toFixed3(item.startDistance),
+        endDistance: toFixed3(item.endDistance),
+      }))
+      .sort((a, b) => a.startDistance - b.startDistance);
+    const comparisonSymbol = threshold.direction === "down" ? "<" : ">";
+    const rangeSummary = rangeSnapshots
+      .slice(0, 3)
+      .map((segment) => `${segment.startDistance.toFixed(2)}-${segment.endDistance.toFixed(2)} m`)
+      .join(", ");
 
     monitorStore.triggeredAlertKeys.add(alertKey);
     schedulePersistTriggeredAlertKeys();
@@ -716,33 +795,57 @@ const evaluateThresholdsForFile = async ({
       fileId: filename,
       thresholdId: threshold.id,
       thresholdLabel: threshold.thresholdLabel,
+      direction: threshold.direction,
       thresholdPercent: threshold.percent,
       thresholdMode: threshold.mode,
       thresholdOffset: threshold.offsetValue,
-      measuredValue: Number(maxHit.measuredValue.toFixed(3)),
-      thresholdValue: Number(maxHit.thresholdValue.toFixed(3)),
-      distance: Number(maxHit.distance.toFixed(3)),
+      measuredValue: toFixed3(maxHit.peakMeasuredValue),
+      thresholdValue: toFixed3(maxHit.peakThresholdValue),
+      distance: toFixed3(maxHit.peakDistance),
+      segmentCount: rangeSnapshots.length,
+      segments: rangeSnapshots,
       createdAt: new Date().toISOString(),
       soundEnabled: threshold.soundEnabled,
       message:
         `Alerta ${type.toUpperCase()} | Canal ${channel} | ${threshold.thresholdLabel} | ` +
-        `Lectura ${maxHit.measuredValue.toFixed(2)} > ${maxHit.thresholdValue.toFixed(2)} ` +
-        `en ${maxHit.distance.toFixed(2)} m`,
+        `Lectura ${maxHit.peakMeasuredValue.toFixed(2)} ${comparisonSymbol} ${maxHit.peakThresholdValue.toFixed(2)} ` +
+        `en ${maxHit.peakDistance.toFixed(2)} m | Tramos: ${rangeSummary}`,
     };
 
     pushAlert(alert);
-    publishModbusPeakEvent({
-      channel,
-      type,
-      fileId: filename,
-      createdAt: alert.createdAt,
-      thresholdName: threshold.thresholdLabel,
-      peakDistances,
-      measuredValue: alert.measuredValue,
-      thresholdValue: alert.thresholdValue,
+
+    const alarmType = resolveAlarmTypeCode({
+      variableType: type,
+      direction: threshold.direction,
     });
+    sortedRanges.forEach((range) => {
+      modbusAlarmCandidates.push({
+        priorityDelta: range.maxDelta,
+        alarmType,
+        startDm: toDistanceDm(range.startDistance),
+        endDm: toDistanceDm(range.endDistance),
+        tempMax: type === "tem" ? range.valueMax : 0,
+        tempMin: type === "tem" ? range.valueMin : 0,
+        strainMax: type === "str" ? range.valueMax : 0,
+        strainMin: type === "str" ? range.valueMin : 0,
+        startAt: detectedAt,
+        updatedAt: detectedAt,
+      });
+    });
+
     void sendTelegramAlert(alert.message);
   });
+
+  if (modbusAlarmCandidates.length > 0) {
+    const alarms = modbusAlarmCandidates
+      .sort((left, right) => right.priorityDelta - left.priorityDelta)
+      .map(({ priorityDelta, ...alarm }) => alarm);
+
+    loadModbusAlarmBatch({
+      scanAt: detectedAt,
+      alarms,
+    });
+  }
 };
 
 const processWatchedFile = async ({ dataRoot, channel, filename }) => {

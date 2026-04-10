@@ -1,49 +1,67 @@
 import net from "net";
 
-const MODBUS_PROTOCOL_VERSION = 1;
 const DEFAULT_MODBUS_HOST = "0.0.0.0";
 const DEFAULT_MODBUS_PORT = 1502;
 const DEFAULT_MODBUS_UNIT_ID = 1;
-const DEFAULT_MAX_EVENTS = 200;
-const DEFAULT_MAX_PEAKS = 10;
-const DEFAULT_EVENT_START_REGISTER = 200;
-const DEFAULT_THRESHOLD_NAME_REGISTERS = 16; // 32 ASCII chars
-const MAX_HOLDING_REGISTERS = 65535;
-const HEARTBEAT_MS = 1000;
+const DEFAULT_MAX_PENDING_BATCHES = 200;
+const DEFAULT_FIBER_LENGTH_DM = 10000;
+const DEFAULT_SPATIAL_RES_DM = 1;
+const DEFAULT_TOTAL_POINTS = 10000;
 
-const HEADER_PROTOCOL_VERSION = 0;
-const HEADER_SERVER_ONLINE = 1;
-const HEADER_HEARTBEAT_HI = 2;
-const HEADER_HEARTBEAT_LO = 3;
-const HEADER_LAST_SEQUENCE_HI = 4;
-const HEADER_LAST_SEQUENCE_LO = 5;
-const HEADER_LAST_SLOT_INDEX = 6;
-const HEADER_EVENT_COUNT = 7;
-const HEADER_MAX_EVENTS = 8;
-const HEADER_MAX_PEAKS = 9;
-const HEADER_EVENT_REGISTERS = 10;
-const HEADER_TOTAL_REGISTERS = 11;
-const HEADER_UNIT_ID = 12;
-const HEADER_CONNECTED_CLIENTS = 13;
-const HEADER_COUNT = 16;
+// 40001..40240 => 240 holding registers (0-based index = address - 40001)
+const HOLDING_REGISTER_COUNT = 240;
+const BLOCK_STATUS_START = 0; // 40001
+const BLOCK_CONTROL_START = 10; // 40011
+const BLOCK_SUMMARY_START = 20; // 40021 (reserved in this implementation)
+const BLOCK_ALARM_START = 30; // 40031
 
-const EVENT_SEQ_OFFSET = 0; // uint32
-const EVENT_YEAR_OFFSET = 2;
-const EVENT_MONTH_OFFSET = 3;
-const EVENT_DAY_OFFSET = 4;
-const EVENT_HOUR_OFFSET = 5;
-const EVENT_MINUTE_OFFSET = 6;
-const EVENT_SECOND_OFFSET = 7;
-const EVENT_CHANNEL_OFFSET = 8;
-const EVENT_TYPE_OFFSET = 9;
-const EVENT_PEAK_COUNT_OFFSET = 10;
-const EVENT_RESERVED_OFFSET = 11;
-const EVENT_FIXED_REGISTERS = 12;
+const IDX_SYSTEM_STATUS = BLOCK_STATUS_START + 0;
+const IDX_FIBER_LENGTH_DM = BLOCK_STATUS_START + 1;
+const IDX_SPATIAL_RES_DM = BLOCK_STATUS_START + 2;
+const IDX_TOTAL_POINTS = BLOCK_STATUS_START + 3;
+const IDX_LAST_SCAN_YEAR = BLOCK_STATUS_START + 4;
+const IDX_LAST_SCAN_MONTH = BLOCK_STATUS_START + 5;
+const IDX_LAST_SCAN_DAY = BLOCK_STATUS_START + 6;
+const IDX_LAST_SCAN_HOUR = BLOCK_STATUS_START + 7;
+const IDX_LAST_SCAN_MINUTE = BLOCK_STATUS_START + 8;
+const IDX_LAST_SCAN_SECOND = BLOCK_STATUS_START + 9;
 
-const TYPE_CODE_MAP = {
-  str: 1,
-  tem: 2,
-};
+const IDX_NEW_DATA_READY = BLOCK_CONTROL_START + 0;
+const IDX_CLEAR_ALL_CMD = BLOCK_CONTROL_START + 1;
+const IDX_BUFFER_STATE = BLOCK_CONTROL_START + 2;
+const IDX_BUFFER_SEQUENCE = BLOCK_CONTROL_START + 3;
+const IDX_TOTAL_ACTIVE_ALARMS = BLOCK_CONTROL_START + 4;
+const IDX_TOTAL_TEMP_HIGH = BLOCK_CONTROL_START + 5;
+const IDX_TOTAL_TEMP_LOW = BLOCK_CONTROL_START + 6;
+const IDX_TOTAL_STRAIN_HIGH = BLOCK_CONTROL_START + 7;
+const IDX_TOTAL_STRAIN_LOW = BLOCK_CONTROL_START + 8;
+const IDX_RESERVED_40020 = BLOCK_CONTROL_START + 9;
+
+const ALARM_SLOT_COUNT = 10;
+const ALARM_SLOT_SIZE = 21;
+
+const ALARM_STATUS_OFFSET = 0;
+const ALARM_ID_OFFSET = 1;
+const ALARM_TYPE_OFFSET = 2;
+const ALARM_START_DM_OFFSET = 3;
+const ALARM_END_DM_OFFSET = 4;
+const ALARM_TEMP_MAX_X10_OFFSET = 5;
+const ALARM_TEMP_MIN_X10_OFFSET = 6;
+const ALARM_STRAIN_MAX_X10_OFFSET = 7;
+const ALARM_STRAIN_MIN_X10_OFFSET = 8;
+const ALARM_START_TS_OFFSET = 9;
+const ALARM_UPDATE_TS_OFFSET = 15;
+
+const SYSTEM_STATUS_NO_DATA = 0;
+const SYSTEM_STATUS_NORMAL = 1;
+const SYSTEM_STATUS_ALARMS_ACTIVE = 2;
+const SYSTEM_STATUS_FAULT = 3;
+
+const BUFFER_STATE_EMPTY = 0;
+const BUFFER_STATE_LOADED = 1;
+
+const ALARM_STATUS_EMPTY = 0;
+const ALARM_STATUS_ACTIVE = 1;
 
 const parseBooleanEnv = (value, fallback = false) => {
   if (value == null) {
@@ -70,88 +88,68 @@ const parseIntegerEnv = (value, fallback, min, max) => {
 const clampUInt16 = (value) =>
   Math.min(0xffff, Math.max(0, Number.isFinite(value) ? Math.round(value) : 0));
 
-const clampUInt32 = (value) =>
-  Math.min(0xffffffff, Math.max(0, Number.isFinite(value) ? Math.round(value) : 0));
-
-const writeUInt32Registers = (registers, startIndex, value) => {
-  const normalized = clampUInt32(value);
-  registers[startIndex] = (normalized >>> 16) & 0xffff;
-  registers[startIndex + 1] = normalized & 0xffff;
+const encodeSignedScaledX10 = (value) => {
+  const scaled = Number.isFinite(value) ? Math.round(value * 10) : 0;
+  const clamped = Math.max(-32768, Math.min(32767, scaled));
+  return clamped < 0 ? 0x10000 + clamped : clamped;
 };
 
-const encodeAsciiPairRegisters = (registers, startIndex, text, registerCount) => {
-  const source = String(text || "");
-  const maxChars = registerCount * 2;
-  const trimmed = source.slice(0, maxChars);
-
-  for (let index = 0; index < registerCount; index += 1) {
-    const charA = trimmed.charCodeAt(index * 2) || 0;
-    const charB = trimmed.charCodeAt(index * 2 + 1) || 0;
-    registers[startIndex + index] = ((charA & 0x7f) << 8) | (charB & 0x7f);
+const toAlarmTypeCode = (value) => {
+  const numeric = Number(value);
+  if ([1, 2, 3, 4].includes(numeric)) {
+    return numeric;
   }
+  return 0;
 };
 
-const buildConfigFromEnv = () => {
-  const enabled = parseBooleanEnv(process.env.MODBUS_ENABLED, false);
-  const host = process.env.MODBUS_HOST || DEFAULT_MODBUS_HOST;
-  const port = parseIntegerEnv(
-    process.env.MODBUS_PORT,
-    DEFAULT_MODBUS_PORT,
-    1,
-    65535
-  );
-  const unitId = parseIntegerEnv(
-    process.env.MODBUS_UNIT_ID,
-    DEFAULT_MODBUS_UNIT_ID,
-    1,
-    247
-  );
-  const maxPeaks = parseIntegerEnv(
-    process.env.MODBUS_MAX_PEAKS,
-    DEFAULT_MAX_PEAKS,
-    1,
-    120
-  );
-  const thresholdNameRegisters = parseIntegerEnv(
-    process.env.MODBUS_THRESHOLD_NAME_REGISTERS,
-    DEFAULT_THRESHOLD_NAME_REGISTERS,
-    8,
-    64
-  );
-  const eventStartRegister = parseIntegerEnv(
-    process.env.MODBUS_EVENT_START_REGISTER,
-    DEFAULT_EVENT_START_REGISTER,
-    HEADER_COUNT,
-    64000
-  );
-
-  const eventRegisters =
-    EVENT_FIXED_REGISTERS + thresholdNameRegisters + maxPeaks * 2;
-  const maxEventSlotsByAddress = Math.max(
-    1,
-    Math.floor((MAX_HOLDING_REGISTERS - eventStartRegister) / eventRegisters)
-  );
-  const maxEvents = parseIntegerEnv(
-    process.env.MODBUS_MAX_EVENTS,
-    DEFAULT_MAX_EVENTS,
-    1,
-    maxEventSlotsByAddress
-  );
-  const totalRegisters = eventStartRegister + maxEvents * eventRegisters;
-
-  return {
-    enabled,
-    host,
-    port,
-    unitId,
-    maxEvents,
-    maxPeaks,
-    thresholdNameRegisters,
-    eventStartRegister,
-    eventRegisters,
-    totalRegisters,
-  };
+const parseDateLike = (value) => {
+  const parsed = new Date(value || Date.now());
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date();
+  }
+  return parsed;
 };
+
+const writeTimestampRegisters = (registers, startIndex, dateLike) => {
+  const dateValue = parseDateLike(dateLike);
+  registers[startIndex + 0] = clampUInt16(dateValue.getFullYear());
+  registers[startIndex + 1] = clampUInt16(dateValue.getMonth() + 1);
+  registers[startIndex + 2] = clampUInt16(dateValue.getDate());
+  registers[startIndex + 3] = clampUInt16(dateValue.getHours());
+  registers[startIndex + 4] = clampUInt16(dateValue.getMinutes());
+  registers[startIndex + 5] = clampUInt16(dateValue.getSeconds());
+};
+
+const buildConfigFromEnv = () => ({
+  enabled: parseBooleanEnv(process.env.MODBUS_ENABLED, false),
+  host: process.env.MODBUS_HOST || DEFAULT_MODBUS_HOST,
+  port: parseIntegerEnv(process.env.MODBUS_PORT, DEFAULT_MODBUS_PORT, 1, 65535),
+  unitId: parseIntegerEnv(process.env.MODBUS_UNIT_ID, DEFAULT_MODBUS_UNIT_ID, 1, 247),
+  maxPendingBatches: parseIntegerEnv(
+    process.env.MODBUS_MAX_PENDING_BATCHES,
+    DEFAULT_MAX_PENDING_BATCHES,
+    1,
+    5000
+  ),
+  fiberLengthDm: parseIntegerEnv(
+    process.env.FIBER_LENGTH_DM,
+    DEFAULT_FIBER_LENGTH_DM,
+    1,
+    200000
+  ),
+  spatialResDm: parseIntegerEnv(
+    process.env.FIBER_SPATIAL_RES_DM,
+    DEFAULT_SPATIAL_RES_DM,
+    1,
+    1000
+  ),
+  totalPoints: parseIntegerEnv(
+    process.env.FIBER_TOTAL_POINTS,
+    DEFAULT_TOTAL_POINTS,
+    1,
+    1000000
+  ),
+});
 
 const state = {
   config: buildConfigFromEnv(),
@@ -159,128 +157,265 @@ const state = {
   online: false,
   startInProgress: false,
   server: null,
-  heartbeatTimer: null,
-  holdingRegisters: new Uint16Array(HEADER_COUNT),
+  holdingRegisters: new Uint16Array(HOLDING_REGISTER_COUNT),
   pendingSockets: new Set(),
   connectedClients: 0,
-  heartbeat: 0,
-  sequence: 0,
-  eventCount: 0,
-  nextSlotIndex: 0,
-  lastSlotIndex: -1,
+  bufferSequence: 0,
+  pendingBatches: [],
   lastError: null,
 };
 
-const resetRegisterMap = (config) => {
-  state.holdingRegisters = new Uint16Array(config.totalRegisters);
+const getAlarmSlotBaseIndex = (slotIndex) =>
+  BLOCK_ALARM_START + slotIndex * ALARM_SLOT_SIZE;
+
+const clearAlarmTableRegisters = () => {
+  state.holdingRegisters.fill(0, BLOCK_ALARM_START, HOLDING_REGISTER_COUNT);
 };
 
-const updateHeaderRegisters = () => {
-  const { config } = state;
+const applyStaticRegisters = () => {
   const registers = state.holdingRegisters;
-  if (registers.length < HEADER_COUNT) {
+  registers[IDX_FIBER_LENGTH_DM] = clampUInt16(state.config.fiberLengthDm);
+  registers[IDX_SPATIAL_RES_DM] = clampUInt16(state.config.spatialResDm);
+  registers[IDX_TOTAL_POINTS] = clampUInt16(state.config.totalPoints);
+  registers[IDX_RESERVED_40020] = 0;
+  registers.fill(0, BLOCK_SUMMARY_START, BLOCK_ALARM_START);
+};
+
+const resetRegisterMap = () => {
+  state.holdingRegisters = new Uint16Array(HOLDING_REGISTER_COUNT);
+  clearAlarmTableRegisters();
+  applyStaticRegisters();
+  state.holdingRegisters[IDX_SYSTEM_STATUS] = SYSTEM_STATUS_NO_DATA;
+  state.holdingRegisters[IDX_NEW_DATA_READY] = 0;
+  state.holdingRegisters[IDX_CLEAR_ALL_CMD] = 0;
+  state.holdingRegisters[IDX_BUFFER_STATE] = BUFFER_STATE_EMPTY;
+  state.holdingRegisters[IDX_BUFFER_SEQUENCE] = clampUInt16(state.bufferSequence);
+  state.holdingRegisters[IDX_TOTAL_ACTIVE_ALARMS] = 0;
+  state.holdingRegisters[IDX_TOTAL_TEMP_HIGH] = 0;
+  state.holdingRegisters[IDX_TOTAL_TEMP_LOW] = 0;
+  state.holdingRegisters[IDX_TOTAL_STRAIN_HIGH] = 0;
+  state.holdingRegisters[IDX_TOTAL_STRAIN_LOW] = 0;
+};
+
+const normalizeAlarmRecord = (alarm) => {
+  const startDmRaw = Number(alarm?.startDm);
+  const endDmRaw = Number(alarm?.endDm);
+  const hasStart = Number.isFinite(startDmRaw);
+  const hasEnd = Number.isFinite(endDmRaw);
+  const normalizedStart = hasStart
+    ? hasEnd
+      ? Math.min(startDmRaw, endDmRaw)
+      : startDmRaw
+    : 0;
+  const normalizedEnd = hasEnd
+    ? hasStart
+      ? Math.max(startDmRaw, endDmRaw)
+      : endDmRaw
+    : normalizedStart;
+  const startDm = clampUInt16(
+    normalizedStart
+  );
+  const endDm = clampUInt16(normalizedEnd);
+
+  return {
+    alarmType: toAlarmTypeCode(alarm?.alarmType),
+    startDm,
+    endDm,
+    tempMax: Number(alarm?.tempMax),
+    tempMin: Number(alarm?.tempMin),
+    strainMax: Number(alarm?.strainMax),
+    strainMin: Number(alarm?.strainMin),
+    startAt: alarm?.startAt,
+    updatedAt: alarm?.updatedAt,
+  };
+};
+
+const writeAlarmSlot = ({
+  slotIndex,
+  alarmId,
+  alarmType,
+  startDm,
+  endDm,
+  tempMax,
+  tempMin,
+  strainMax,
+  strainMin,
+  startAt,
+  updatedAt,
+}) => {
+  if (slotIndex < 0 || slotIndex >= ALARM_SLOT_COUNT) {
     return;
   }
-
-  registers[HEADER_PROTOCOL_VERSION] = MODBUS_PROTOCOL_VERSION;
-  registers[HEADER_SERVER_ONLINE] = state.online ? 1 : 0;
-  writeUInt32Registers(registers, HEADER_HEARTBEAT_HI, state.heartbeat);
-  writeUInt32Registers(registers, HEADER_LAST_SEQUENCE_HI, state.sequence);
-  registers[HEADER_LAST_SLOT_INDEX] =
-    state.lastSlotIndex >= 0 ? clampUInt16(state.lastSlotIndex) : 0xffff;
-  registers[HEADER_EVENT_COUNT] = clampUInt16(state.eventCount);
-  registers[HEADER_MAX_EVENTS] = clampUInt16(config.maxEvents);
-  registers[HEADER_MAX_PEAKS] = clampUInt16(config.maxPeaks);
-  registers[HEADER_EVENT_REGISTERS] = clampUInt16(config.eventRegisters);
-  registers[HEADER_TOTAL_REGISTERS] = clampUInt16(config.totalRegisters);
-  registers[HEADER_UNIT_ID] = clampUInt16(config.unitId);
-  registers[HEADER_CONNECTED_CLIENTS] = clampUInt16(state.connectedClients);
-};
-
-const getTypeCode = (type) => TYPE_CODE_MAP[String(type || "").toLowerCase()] || 0;
-
-const getEventDate = (createdAt) => {
-  const parsed = new Date(createdAt || Date.now());
-  if (Number.isNaN(parsed.getTime())) {
-    return new Date();
-  }
-  return parsed;
-};
-
-const normalizePeakDistances = (event, maxPeaks) => {
-  const fromArray = Array.isArray(event?.peakDistances)
-    ? event.peakDistances
-    : Number.isFinite(event?.distance)
-      ? [event.distance]
-      : [];
-
-  const unique = new Set();
-  const normalized = [];
-  fromArray.forEach((value) => {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
-      return;
-    }
-    const rounded = Number(numeric.toFixed(3));
-    const key = rounded.toFixed(3);
-    if (unique.has(key)) {
-      return;
-    }
-    unique.add(key);
-    normalized.push(rounded);
-  });
-
-  return normalized.slice(0, maxPeaks);
-};
-
-const writeEventIntoRegisters = ({ event, sequence, slotIndex }) => {
-  const { config } = state;
   const registers = state.holdingRegisters;
-  const base =
-    config.eventStartRegister + slotIndex * config.eventRegisters;
-  const end = base + config.eventRegisters;
-  registers.fill(0, base, end);
+  const base = getAlarmSlotBaseIndex(slotIndex);
+  registers.fill(0, base, base + ALARM_SLOT_SIZE);
 
-  const eventDate = getEventDate(event?.createdAt);
-  const typeCode = getTypeCode(event?.type);
-  const channelNumber = clampUInt16(Number(event?.channel));
-  const peaks = normalizePeakDistances(event, config.maxPeaks);
-  const thresholdName =
-    typeof event?.thresholdName === "string" && event.thresholdName.trim()
-      ? event.thresholdName.trim()
-      : "umbral";
+  registers[base + ALARM_STATUS_OFFSET] = ALARM_STATUS_ACTIVE;
+  registers[base + ALARM_ID_OFFSET] = clampUInt16(alarmId);
+  registers[base + ALARM_TYPE_OFFSET] = clampUInt16(alarmType);
+  registers[base + ALARM_START_DM_OFFSET] = clampUInt16(startDm);
+  registers[base + ALARM_END_DM_OFFSET] = clampUInt16(endDm);
+  registers[base + ALARM_TEMP_MAX_X10_OFFSET] = encodeSignedScaledX10(tempMax);
+  registers[base + ALARM_TEMP_MIN_X10_OFFSET] = encodeSignedScaledX10(tempMin);
+  registers[base + ALARM_STRAIN_MAX_X10_OFFSET] = encodeSignedScaledX10(strainMax);
+  registers[base + ALARM_STRAIN_MIN_X10_OFFSET] = encodeSignedScaledX10(strainMin);
+  writeTimestampRegisters(registers, base + ALARM_START_TS_OFFSET, startAt);
+  writeTimestampRegisters(registers, base + ALARM_UPDATE_TS_OFFSET, updatedAt);
+};
 
-  writeUInt32Registers(registers, base + EVENT_SEQ_OFFSET, sequence);
-  registers[base + EVENT_YEAR_OFFSET] = clampUInt16(eventDate.getFullYear());
-  registers[base + EVENT_MONTH_OFFSET] = clampUInt16(eventDate.getMonth() + 1);
-  registers[base + EVENT_DAY_OFFSET] = clampUInt16(eventDate.getDate());
-  registers[base + EVENT_HOUR_OFFSET] = clampUInt16(eventDate.getHours());
-  registers[base + EVENT_MINUTE_OFFSET] = clampUInt16(eventDate.getMinutes());
-  registers[base + EVENT_SECOND_OFFSET] = clampUInt16(eventDate.getSeconds());
-  registers[base + EVENT_CHANNEL_OFFSET] = channelNumber;
-  registers[base + EVENT_TYPE_OFFSET] = typeCode;
-  registers[base + EVENT_PEAK_COUNT_OFFSET] = clampUInt16(peaks.length);
-  registers[base + EVENT_RESERVED_OFFSET] = 0;
+const clearHandshakeRegisters = ({ keepSequence = true } = {}) => {
+  const registers = state.holdingRegisters;
+  registers[IDX_NEW_DATA_READY] = 0;
+  registers[IDX_CLEAR_ALL_CMD] = 0;
+  registers[IDX_BUFFER_STATE] = BUFFER_STATE_EMPTY;
+  registers[IDX_TOTAL_ACTIVE_ALARMS] = 0;
+  registers[IDX_TOTAL_TEMP_HIGH] = 0;
+  registers[IDX_TOTAL_TEMP_LOW] = 0;
+  registers[IDX_TOTAL_STRAIN_HIGH] = 0;
+  registers[IDX_TOTAL_STRAIN_LOW] = 0;
+  if (!keepSequence) {
+    state.bufferSequence = 0;
+  }
+  registers[IDX_BUFFER_SEQUENCE] = clampUInt16(state.bufferSequence);
+};
 
-  encodeAsciiPairRegisters(
-    registers,
-    base + EVENT_FIXED_REGISTERS,
-    thresholdName,
-    config.thresholdNameRegisters
-  );
+const isTableFrozen = () =>
+  state.holdingRegisters[IDX_NEW_DATA_READY] === 1 &&
+  state.holdingRegisters[IDX_BUFFER_STATE] === BUFFER_STATE_LOADED;
 
-  const peaksStart = base + EVENT_FIXED_REGISTERS + config.thresholdNameRegisters;
-  peaks.forEach((distanceMeters, index) => {
-    const scaled = clampUInt32(Math.round(distanceMeters * 1000));
-    writeUInt32Registers(registers, peaksStart + index * 2, scaled);
+const loadAlarmBatchInternal = (batch) => {
+  const alarms = Array.isArray(batch?.alarms) ? batch.alarms : [];
+  if (alarms.length === 0) {
+    return {
+      accepted: false,
+      queued: false,
+      reason: "empty",
+      queueSize: state.pendingBatches.length,
+    };
+  }
+
+  const normalized = alarms
+    .map(normalizeAlarmRecord)
+    .filter((alarm) => alarm.alarmType > 0)
+    .slice(0, ALARM_SLOT_COUNT);
+
+  if (normalized.length === 0) {
+    return {
+      accepted: false,
+      queued: false,
+      reason: "invalid",
+      queueSize: state.pendingBatches.length,
+    };
+  }
+
+  const scanAt = parseDateLike(batch?.scanAt);
+  const timestamp = scanAt.toISOString();
+
+  clearAlarmTableRegisters();
+  writeTimestampRegisters(state.holdingRegisters, IDX_LAST_SCAN_YEAR, timestamp);
+
+  let tempHigh = 0;
+  let tempLow = 0;
+  let strainHigh = 0;
+  let strainLow = 0;
+
+  normalized.forEach((alarm, slotIndex) => {
+    if (alarm.alarmType === 1) tempHigh += 1;
+    if (alarm.alarmType === 2) tempLow += 1;
+    if (alarm.alarmType === 3) strainHigh += 1;
+    if (alarm.alarmType === 4) strainLow += 1;
+
+    writeAlarmSlot({
+      slotIndex,
+      alarmId: slotIndex + 1,
+      alarmType: alarm.alarmType,
+      startDm: alarm.startDm,
+      endDm: alarm.endDm,
+      tempMax: alarm.tempMax,
+      tempMin: alarm.tempMin,
+      strainMax: alarm.strainMax,
+      strainMin: alarm.strainMin,
+      startAt: alarm.startAt || timestamp,
+      updatedAt: alarm.updatedAt || timestamp,
+    });
   });
+
+  state.bufferSequence = (state.bufferSequence + 1) & 0xffff;
+  if (state.bufferSequence === 0) {
+    state.bufferSequence = 1;
+  }
+
+  state.holdingRegisters[IDX_SYSTEM_STATUS] = SYSTEM_STATUS_ALARMS_ACTIVE;
+  state.holdingRegisters[IDX_NEW_DATA_READY] = 1;
+  state.holdingRegisters[IDX_CLEAR_ALL_CMD] = 0;
+  state.holdingRegisters[IDX_BUFFER_STATE] = BUFFER_STATE_LOADED;
+  state.holdingRegisters[IDX_BUFFER_SEQUENCE] = clampUInt16(state.bufferSequence);
+  state.holdingRegisters[IDX_TOTAL_ACTIVE_ALARMS] = clampUInt16(normalized.length);
+  state.holdingRegisters[IDX_TOTAL_TEMP_HIGH] = clampUInt16(tempHigh);
+  state.holdingRegisters[IDX_TOTAL_TEMP_LOW] = clampUInt16(tempLow);
+  state.holdingRegisters[IDX_TOTAL_STRAIN_HIGH] = clampUInt16(strainHigh);
+  state.holdingRegisters[IDX_TOTAL_STRAIN_LOW] = clampUInt16(strainLow);
+
+  return {
+    accepted: true,
+    queued: false,
+    reason: null,
+    queueSize: state.pendingBatches.length,
+    loadedCount: normalized.length,
+  };
+};
+
+const dequeueAndLoadIfAvailable = () => {
+  if (isTableFrozen()) {
+    return;
+  }
+  const nextBatch = state.pendingBatches.shift();
+  if (!nextBatch) {
+    return;
+  }
+  const outcome = loadAlarmBatchInternal(nextBatch);
+  if (!outcome.accepted) {
+    state.lastError = `queued batch rejected: ${outcome.reason || "unknown"}`;
+  }
+};
+
+const clearLoadedAlarmData = () => {
+  clearAlarmTableRegisters();
+  clearHandshakeRegisters({ keepSequence: true });
+  state.holdingRegisters[IDX_SYSTEM_STATUS] = SYSTEM_STATUS_NORMAL;
+};
+
+const enqueueBatch = (batch) => {
+  if (state.pendingBatches.length >= state.config.maxPendingBatches) {
+    state.pendingBatches.shift();
+  }
+  state.pendingBatches.push(batch);
+};
+
+const applyWriteCommand = ({ startAddress, values }) => {
+  if (startAddress !== IDX_CLEAR_ALL_CMD || values.length !== 1) {
+    return { ok: false, exceptionCode: 0x02 };
+  }
+
+  const writeValue = clampUInt16(values[0]);
+  if (writeValue === 1) {
+    state.holdingRegisters[IDX_CLEAR_ALL_CMD] = 1;
+    clearLoadedAlarmData();
+    state.holdingRegisters[IDX_CLEAR_ALL_CMD] = 0;
+    dequeueAndLoadIfAvailable();
+    return { ok: true };
+  }
+
+  // Accept write 0 as no-op reset.
+  state.holdingRegisters[IDX_CLEAR_ALL_CMD] = 0;
+  return { ok: true };
 };
 
 const sendResponseFrame = ({ socket, transactionId, unitId, pdu }) => {
   const response = Buffer.alloc(7 + pdu.length);
   response.writeUInt16BE(transactionId, 0);
-  response.writeUInt16BE(0, 2); // protocol id
-  response.writeUInt16BE(1 + pdu.length, 4); // length includes unit id
+  response.writeUInt16BE(0, 2);
+  response.writeUInt16BE(1 + pdu.length, 4);
   response.writeUInt8(unitId, 6);
   pdu.copy(response, 7);
   socket.write(response);
@@ -294,12 +429,7 @@ const sendException = ({
   exceptionCode,
 }) => {
   const pdu = Buffer.from([(functionCode | 0x80) & 0xff, exceptionCode & 0xff]);
-  sendResponseFrame({
-    socket,
-    transactionId,
-    unitId,
-    pdu,
-  });
+  sendResponseFrame({ socket, transactionId, unitId, pdu });
 };
 
 const handleReadRegisters = ({
@@ -332,7 +462,6 @@ const handleReadRegisters = ({
     });
     return;
   }
-
   if (startAddress + quantity > state.holdingRegisters.length) {
     sendException({
       socket,
@@ -348,20 +477,122 @@ const handleReadRegisters = ({
   const responsePdu = Buffer.alloc(2 + byteCount);
   responsePdu.writeUInt8(functionCode, 0);
   responsePdu.writeUInt8(byteCount, 1);
-
   for (let index = 0; index < quantity; index += 1) {
     responsePdu.writeUInt16BE(
       state.holdingRegisters[startAddress + index],
       2 + index * 2
     );
   }
+  sendResponseFrame({ socket, transactionId, unitId, pdu: responsePdu });
+};
 
-  sendResponseFrame({
-    socket,
-    transactionId,
-    unitId,
-    pdu: responsePdu,
+const handleWriteSingleRegister = ({
+  socket,
+  transactionId,
+  unitId,
+  functionCode,
+  pdu,
+}) => {
+  if (pdu.length < 5) {
+    sendException({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      exceptionCode: 0x03,
+    });
+    return;
+  }
+
+  const address = pdu.readUInt16BE(1);
+  const value = pdu.readUInt16BE(3);
+  const result = applyWriteCommand({
+    startAddress: address,
+    values: [value],
   });
+  if (!result.ok) {
+    sendException({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      exceptionCode: result.exceptionCode || 0x04,
+    });
+    return;
+  }
+
+  const responsePdu = Buffer.from(pdu.subarray(0, 5));
+  sendResponseFrame({ socket, transactionId, unitId, pdu: responsePdu });
+};
+
+const handleWriteMultipleRegisters = ({
+  socket,
+  transactionId,
+  unitId,
+  functionCode,
+  pdu,
+}) => {
+  if (pdu.length < 6) {
+    sendException({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      exceptionCode: 0x03,
+    });
+    return;
+  }
+
+  const startAddress = pdu.readUInt16BE(1);
+  const quantity = pdu.readUInt16BE(3);
+  const byteCount = pdu.readUInt8(5);
+  if (quantity < 1 || quantity > 123 || byteCount !== quantity * 2) {
+    sendException({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      exceptionCode: 0x03,
+    });
+    return;
+  }
+
+  if (pdu.length < 6 + byteCount) {
+    sendException({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      exceptionCode: 0x03,
+    });
+    return;
+  }
+
+  const values = [];
+  for (let index = 0; index < quantity; index += 1) {
+    values.push(pdu.readUInt16BE(6 + index * 2));
+  }
+
+  const result = applyWriteCommand({
+    startAddress,
+    values,
+  });
+  if (!result.ok) {
+    sendException({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      exceptionCode: result.exceptionCode || 0x04,
+    });
+    return;
+  }
+
+  const responsePdu = Buffer.alloc(5);
+  responsePdu.writeUInt8(functionCode, 0);
+  responsePdu.writeUInt16BE(startAddress, 1);
+  responsePdu.writeUInt16BE(quantity, 3);
+  sendResponseFrame({ socket, transactionId, unitId, pdu: responsePdu });
 };
 
 const handleRequestFrame = (socket, frame) => {
@@ -378,7 +609,6 @@ const handleRequestFrame = (socket, frame) => {
   if (protocolId !== 0 || !functionCode) {
     return;
   }
-
   if (unitId !== state.config.unitId) {
     sendException({
       socket,
@@ -400,6 +630,26 @@ const handleRequestFrame = (socket, frame) => {
     });
     return;
   }
+  if (functionCode === 0x06) {
+    handleWriteSingleRegister({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      pdu,
+    });
+    return;
+  }
+  if (functionCode === 0x10) {
+    handleWriteMultipleRegisters({
+      socket,
+      transactionId,
+      unitId,
+      functionCode,
+      pdu,
+    });
+    return;
+  }
 
   sendException({
     socket,
@@ -412,7 +662,6 @@ const handleRequestFrame = (socket, frame) => {
 
 const attachSocketHandlers = (socket) => {
   state.connectedClients += 1;
-  updateHeaderRegisters();
   state.pendingSockets.add(socket);
 
   let pending = Buffer.alloc(0);
@@ -431,33 +680,13 @@ const attachSocketHandlers = (socket) => {
   });
 
   socket.on("error", () => {
-    // Ignore per-connection transport errors; status is tracked on server-level.
+    // ignore per-connection errors
   });
 
   socket.on("close", () => {
     state.pendingSockets.delete(socket);
     state.connectedClients = Math.max(0, state.connectedClients - 1);
-    updateHeaderRegisters();
   });
-};
-
-const startHeartbeat = () => {
-  if (state.heartbeatTimer) {
-    clearInterval(state.heartbeatTimer);
-  }
-
-  state.heartbeatTimer = setInterval(() => {
-    state.heartbeat = (state.heartbeat + 1) >>> 0;
-    updateHeaderRegisters();
-  }, HEARTBEAT_MS);
-};
-
-const stopHeartbeat = () => {
-  if (!state.heartbeatTimer) {
-    return;
-  }
-  clearInterval(state.heartbeatTimer);
-  state.heartbeatTimer = null;
 };
 
 const closeServer = () =>
@@ -478,14 +707,18 @@ export const getModbusPublisherStatus = () => ({
   host: state.config.host,
   port: state.config.port,
   unitId: state.config.unitId,
-  maxEvents: state.config.maxEvents,
-  maxPeaks: state.config.maxPeaks,
-  eventRegisters: state.config.eventRegisters,
-  eventStartRegister: state.config.eventStartRegister,
-  totalRegisters: state.config.totalRegisters,
-  eventCount: state.eventCount,
-  sequence: state.sequence,
-  lastSlotIndex: state.lastSlotIndex,
+  mapStart: 40001,
+  mapEnd: 40240,
+  totalRegisters: HOLDING_REGISTER_COUNT,
+  alarmSlotCount: ALARM_SLOT_COUNT,
+  alarmSlotSize: ALARM_SLOT_SIZE,
+  systemStatus: state.holdingRegisters[IDX_SYSTEM_STATUS],
+  newDataReady: state.holdingRegisters[IDX_NEW_DATA_READY],
+  bufferState: state.holdingRegisters[IDX_BUFFER_STATE],
+  bufferSequence: state.holdingRegisters[IDX_BUFFER_SEQUENCE],
+  totalActiveAlarms: state.holdingRegisters[IDX_TOTAL_ACTIVE_ALARMS],
+  pendingBatches: state.pendingBatches.length,
+  maxPendingBatches: state.config.maxPendingBatches,
   connectedClients: state.connectedClients,
   lastError: state.lastError,
 });
@@ -496,8 +729,9 @@ export const startModbusEventPublisherFromEnv = async () => {
     state.started = false;
     state.online = false;
     state.lastError = null;
-    resetRegisterMap(state.config);
-    updateHeaderRegisters();
+    state.bufferSequence = 0;
+    state.pendingBatches = [];
+    resetRegisterMap();
     return getModbusPublisherStatus();
   }
 
@@ -507,8 +741,9 @@ export const startModbusEventPublisherFromEnv = async () => {
 
   state.startInProgress = true;
   state.lastError = null;
-  resetRegisterMap(state.config);
-  updateHeaderRegisters();
+  state.pendingBatches = [];
+  state.bufferSequence = 0;
+  resetRegisterMap();
 
   const server = net.createServer((socket) => {
     attachSocketHandlers(socket);
@@ -518,15 +753,16 @@ export const startModbusEventPublisherFromEnv = async () => {
   server.on("error", (error) => {
     state.lastError = error?.message || String(error);
     state.online = false;
-    updateHeaderRegisters();
+    state.holdingRegisters[IDX_SYSTEM_STATUS] = SYSTEM_STATUS_FAULT;
   });
 
   await new Promise((resolve) => {
     server.listen(state.config.port, state.config.host, () => {
       state.online = true;
       state.started = true;
-      startHeartbeat();
-      updateHeaderRegisters();
+      if (state.holdingRegisters[IDX_SYSTEM_STATUS] === SYSTEM_STATUS_NO_DATA) {
+        state.holdingRegisters[IDX_SYSTEM_STATUS] = SYSTEM_STATUS_NORMAL;
+      }
       resolve();
     });
     server.once("error", () => {
@@ -541,46 +777,81 @@ export const startModbusEventPublisherFromEnv = async () => {
 export const stopModbusEventPublisher = async () => {
   state.startInProgress = false;
   state.started = false;
-  stopHeartbeat();
 
   state.pendingSockets.forEach((socket) => {
     try {
       socket.destroy();
     } catch {
-      // ignore close errors
+      // ignore
     }
   });
   state.pendingSockets.clear();
   state.connectedClients = 0;
   state.online = false;
+  state.pendingBatches = [];
 
   await closeServer();
   state.server = null;
-  updateHeaderRegisters();
   return getModbusPublisherStatus();
 };
 
-export const publishModbusPeakEvent = (event) => {
+export const loadModbusAlarmBatch = (batch) => {
   if (!state.config.enabled || !state.online) {
-    return false;
+    return {
+      accepted: false,
+      queued: false,
+      reason: "offline",
+      queueSize: state.pendingBatches.length,
+    };
   }
 
-  let nextSequence = (state.sequence + 1) >>> 0;
-  if (nextSequence === 0) {
-    nextSequence = 1;
+  if (isTableFrozen()) {
+    enqueueBatch(batch);
+    return {
+      accepted: false,
+      queued: true,
+      reason: "frozen",
+      queueSize: state.pendingBatches.length,
+    };
   }
 
-  const slotIndex = state.nextSlotIndex;
-  writeEventIntoRegisters({
-    event,
-    sequence: nextSequence,
-    slotIndex,
-  });
+  return loadAlarmBatchInternal(batch);
+};
 
-  state.sequence = nextSequence;
-  state.lastSlotIndex = slotIndex;
-  state.nextSlotIndex = (slotIndex + 1) % state.config.maxEvents;
-  state.eventCount = Math.min(state.eventCount + 1, state.config.maxEvents);
-  updateHeaderRegisters();
-  return true;
+// Backward compatibility while callers migrate.
+export const publishModbusPeakEvent = (event) => {
+  const variableType = String(event?.type || "").toLowerCase();
+  const alarmType = variableType === "str" ? 3 : 1;
+  const fallbackDistance = Number(event?.distance);
+  const rangeSource = Array.isArray(event?.peakRanges)
+    ? event.peakRanges
+    : Array.isArray(event?.peakDistances)
+      ? event.peakDistances.map((distance) => ({
+          startDistance: Number(distance),
+          endDistance: Number(distance),
+        }))
+      : Number.isFinite(fallbackDistance)
+        ? [{ startDistance: fallbackDistance, endDistance: fallbackDistance }]
+        : [];
+
+  const alarms = rangeSource
+    .map((range) => ({
+      alarmType,
+      startDm: Math.round(Number(range?.startDistance) * 10),
+      endDm: Math.round(Number(range?.endDistance) * 10),
+      tempMax: variableType === "tem" ? Number(event?.measuredValue) : 0,
+      tempMin: variableType === "tem" ? Number(event?.thresholdValue) : 0,
+      strainMax: variableType === "str" ? Number(event?.measuredValue) : 0,
+      strainMin: variableType === "str" ? Number(event?.thresholdValue) : 0,
+      startAt: event?.createdAt,
+      updatedAt: event?.createdAt,
+    }))
+    .filter(
+      (alarm) => Number.isFinite(alarm.startDm) && Number.isFinite(alarm.endDm)
+    );
+
+  return loadModbusAlarmBatch({
+    scanAt: event?.createdAt,
+    alarms,
+  }).accepted;
 };
