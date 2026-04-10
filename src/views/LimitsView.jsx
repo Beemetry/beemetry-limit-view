@@ -262,6 +262,9 @@ const formatAlertTime = (isoValue) => {
   return date.toLocaleTimeString();
 };
 
+const getAlertTypeLabel = (typeValue) =>
+  typeValue === "str" ? "Tension" : "Temperatura";
+
 const getYBoundsFromPoints = (points, fallbackRange) => {
   let minY = Number.POSITIVE_INFINITY;
   let maxY = Number.NEGATIVE_INFINITY;
@@ -1594,6 +1597,87 @@ const LimitsView = () => {
     window.URL.revokeObjectURL(url);
   };
 
+  const handleDownloadAlertSegments = (alert) => {
+    if (
+      typeof window === "undefined" ||
+      !Array.isArray(alert?.segments) ||
+      alert.segments.length === 0
+    ) {
+      return;
+    }
+
+    const lines = [
+      [
+        "alerta_id",
+        "canal",
+        "tipo",
+        "umbral_nombre",
+        "direccion",
+        "pico_valor",
+        "valor_umbral",
+        "pico_metro",
+        "tramo_index",
+        "inicio_m",
+        "fin_m",
+        "longitud_m",
+        "fecha",
+      ].join(","),
+    ];
+
+    alert.segments.forEach((segment, index) => {
+      const startDistance = Number(segment?.startDistance);
+      const endDistance = Number(segment?.endDistance);
+      const safeStart = Number.isFinite(startDistance)
+        ? Number(startDistance.toFixed(3))
+        : "";
+      const safeEnd = Number.isFinite(endDistance)
+        ? Number(endDistance.toFixed(3))
+        : "";
+      const lengthMeters =
+        Number.isFinite(startDistance) && Number.isFinite(endDistance)
+          ? Number(Math.abs(endDistance - startDistance).toFixed(3))
+          : "";
+
+      lines.push(
+        [
+          alert.id,
+          alert.channel,
+          getAlertTypeLabel(alert.type),
+          `"${String(alert.thresholdLabel || "").replaceAll('"', '""')}"`,
+          alert.direction === "down" ? "baja" : "alta",
+          Number(alert.measuredValue).toFixed(3),
+          Number(alert.thresholdValue).toFixed(3),
+          Number(alert.distance).toFixed(3),
+          index + 1,
+          safeStart,
+          safeEnd,
+          lengthMeters,
+          `"${alert.createdAt || ""}"`,
+        ].join(",")
+      );
+    });
+
+    const csvContent = lines.join("\n");
+    const blob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const safeType = alert.type === "str" ? "tension" : "temperatura";
+    const safeChannel = `canal_${alert.channel || "x"}`;
+    const safeName = String(alert.thresholdLabel || "umbral")
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/gi, "_")
+      .replace(/^_+|_+$/g, "");
+
+    link.href = url;
+    link.download = `tramos_${safeChannel}_${safeType}_${safeName || "alarma"}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  };
+
   const handleManualReading1Change = (event) => {
     setManualReading1(event.target.value);
   };
@@ -1983,29 +2067,54 @@ const LimitsView = () => {
                         </div>
                         <div className="text-slate-500">
                           Canal {alert.channel} |{" "}
-                          {alert.type === "str" ? "Tension" : "Temperatura"} |{" "}
+                          {getAlertTypeLabel(alert.type)} |{" "}
                           {formatAlertTime(alert.createdAt)}
                         </div>
                         <div className="text-slate-700">
-                          Lectura {Number(alert.measuredValue).toFixed(2)}{" "}
-                          {alert.direction === "down" ? "<" : ">"}{" "}
-                          {Number(alert.thresholdValue).toFixed(2)} en{" "}
-                          {Number(alert.distance).toFixed(2)} m
+                          Pico detectado:{" "}
+                          <span className="font-semibold">
+                            {Number(alert.measuredValue).toFixed(2)}
+                          </span>{" "}
+                          | Umbral:{" "}
+                          <span className="font-semibold">
+                            {alert.direction === "down" ? "<" : ">"}{" "}
+                            {Number(alert.thresholdValue).toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="text-slate-700">
+                          Ubicacion del pico:{" "}
+                          <span className="font-semibold">
+                            {Number(alert.distance).toFixed(2)} m
+                          </span>
                         </div>
                         {Array.isArray(alert.segments) && alert.segments.length > 0 && (
-                          <div className="text-slate-600 mt-1">
-                            Tramos ({alert.segmentCount || alert.segments.length}):{" "}
-                            {alert.segments
-                              .slice(0, 3)
-                              .map(
-                                (segment) =>
-                                  `${Number(segment.startDistance).toFixed(2)}-${Number(
-                                    segment.endDistance
-                                  ).toFixed(2)} m`
-                              )
-                              .join(" | ")}
-                            {alert.segments.length > 3 ? " | ..." : ""}
-                          </div>
+                          <>
+                            <div className="text-slate-600 mt-1">
+                              Tramos detectados:{" "}
+                              <span className="font-semibold">
+                                {alert.segmentCount || alert.segments.length}
+                              </span>
+                            </div>
+                            <div className="text-slate-600">
+                              Vista rapida:{" "}
+                              {alert.segments
+                                .slice(0, 3)
+                                .map(
+                                  (segment) =>
+                                    `${Number(segment.startDistance).toFixed(2)}-${Number(
+                                      segment.endDistance
+                                    ).toFixed(2)} m`
+                                )
+                                .join(" | ")}
+                              {alert.segments.length > 3 ? " | ..." : ""}
+                            </div>
+                            <button
+                              onClick={() => handleDownloadAlertSegments(alert)}
+                              className="mt-2 px-2 py-1 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+                            >
+                              Descargar tramos CSV
+                            </button>
+                          </>
                         )}
                       </div>
                     ))
