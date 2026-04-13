@@ -721,6 +721,31 @@ const resolveAlarmTypeCode = ({ variableType, direction }) => {
 const toDistanceDm = (distanceMeters) =>
   Math.max(0, Math.min(0xffff, Math.round(Number(distanceMeters) * 10)));
 
+const calculateSpatialResolutionCmX10 = (points) => {
+  if (!Array.isArray(points) || points.length < 2) {
+    return null;
+  }
+
+  const deltas = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const current = Number(points[index]?.distance);
+    const previous = Number(points[index - 1]?.distance);
+    const delta = current - previous;
+    if (Number.isFinite(delta) && delta > 0) {
+      deltas.push(delta);
+    }
+  }
+
+  if (deltas.length === 0) {
+    return null;
+  }
+
+  deltas.sort((left, right) => left - right);
+  const medianDeltaMeters = deltas[Math.floor(deltas.length / 2)];
+  // meters -> cm*10 (0.1 cm resolution)
+  return Math.max(1, Math.min(0xffff, Math.round(medianDeltaMeters * 1000)));
+};
+
 const evaluateThresholdsForFile = async ({
   dataRoot,
   channel,
@@ -822,6 +847,7 @@ const evaluateThresholdsForFile = async ({
       modbusAlarmCandidates.push({
         priorityDelta: range.maxDelta,
         alarmType,
+        channelId: Number(channel),
         startDm: toDistanceDm(range.startDistance),
         endDm: toDistanceDm(range.endDistance),
         tempMax: type === "tem" ? range.valueMax : 0,
@@ -840,9 +866,13 @@ const evaluateThresholdsForFile = async ({
     const alarms = modbusAlarmCandidates
       .sort((left, right) => right.priorityDelta - left.priorityDelta)
       .map(({ priorityDelta, ...alarm }) => alarm);
+    const spatialResCmX10 = calculateSpatialResolutionCmX10(filePoints);
 
     loadModbusAlarmBatch({
       scanAt: detectedAt,
+      channelId: Number(channel),
+      totalPointsRead: filePoints.length,
+      spatialResCmX10,
       alarms,
     });
   }

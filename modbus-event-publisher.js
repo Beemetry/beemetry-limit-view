@@ -4,20 +4,20 @@ const DEFAULT_MODBUS_HOST = "0.0.0.0";
 const DEFAULT_MODBUS_PORT = 1502;
 const DEFAULT_MODBUS_UNIT_ID = 1;
 const DEFAULT_MAX_PENDING_BATCHES = 200;
-const DEFAULT_FIBER_LENGTH_DM = 10000;
-const DEFAULT_SPATIAL_RES_DM = 1;
-const DEFAULT_TOTAL_POINTS = 10000;
+const DEFAULT_FIBER_LENGTH_DM = 800;
+const DEFAULT_SPATIAL_RES_CM_X10 = 52; // 5.2 cm -> 52
+const DEFAULT_TOTAL_POINTS = 30770;
 
-// 40001..40240 => 240 holding registers (0-based index = address - 40001)
-const HOLDING_REGISTER_COUNT = 240;
-const BLOCK_STATUS_START = 0; // 40001
-const BLOCK_CONTROL_START = 10; // 40011
-const BLOCK_SUMMARY_START = 20; // 40021 (reserved in this implementation)
-const BLOCK_ALARM_START = 30; // 40031
+// 40000..40329 => 330 holding registers (0-based index = address - 40000)
+const HOLDING_REGISTER_COUNT = 330;
+const BLOCK_STATUS_START = 0; // 40000
+const BLOCK_CONTROL_START = 10; // 40010
+const BLOCK_SUMMARY_START = 20; // 40020 (reserved in this implementation)
+const BLOCK_ALARM_START = 30; // 40030
 
 const IDX_SYSTEM_STATUS = BLOCK_STATUS_START + 0;
 const IDX_FIBER_LENGTH_DM = BLOCK_STATUS_START + 1;
-const IDX_SPATIAL_RES_DM = BLOCK_STATUS_START + 2;
+const IDX_SPATIAL_RES_CM_X10 = BLOCK_STATUS_START + 2;
 const IDX_TOTAL_POINTS = BLOCK_STATUS_START + 3;
 const IDX_LAST_SCAN_YEAR = BLOCK_STATUS_START + 4;
 const IDX_LAST_SCAN_MONTH = BLOCK_STATUS_START + 5;
@@ -35,10 +35,11 @@ const IDX_TOTAL_TEMP_HIGH = BLOCK_CONTROL_START + 5;
 const IDX_TOTAL_TEMP_LOW = BLOCK_CONTROL_START + 6;
 const IDX_TOTAL_STRAIN_HIGH = BLOCK_CONTROL_START + 7;
 const IDX_TOTAL_STRAIN_LOW = BLOCK_CONTROL_START + 8;
-const IDX_RESERVED_40020 = BLOCK_CONTROL_START + 9;
+const IDX_RESERVED_40019 = BLOCK_CONTROL_START + 9;
 
-const ALARM_SLOT_COUNT = 10;
-const ALARM_SLOT_SIZE = 21;
+const ALARM_SLOT_COUNT = 30;
+const ALARM_SLOT_SIZE = 10;
+const ALARM_SLOTS_PER_CHANNEL = 10;
 
 const ALARM_STATUS_OFFSET = 0;
 const ALARM_ID_OFFSET = 1;
@@ -49,8 +50,7 @@ const ALARM_TEMP_MAX_X10_OFFSET = 5;
 const ALARM_TEMP_MIN_X10_OFFSET = 6;
 const ALARM_STRAIN_MAX_X10_OFFSET = 7;
 const ALARM_STRAIN_MIN_X10_OFFSET = 8;
-const ALARM_START_TS_OFFSET = 9;
-const ALARM_UPDATE_TS_OFFSET = 15;
+const ALARM_CHANNEL_OFFSET = 9;
 
 const SYSTEM_STATUS_NO_DATA = 0;
 const SYSTEM_STATUS_NORMAL = 1;
@@ -102,6 +102,14 @@ const toAlarmTypeCode = (value) => {
   return 0;
 };
 
+const normalizeChannelId = (value) => {
+  const numeric = Number.parseInt(String(value ?? ""), 10);
+  if ([1, 2, 3].includes(numeric)) {
+    return numeric;
+  }
+  return 0;
+};
+
 const parseDateLike = (value) => {
   const parsed = new Date(value || Date.now());
   if (Number.isNaN(parsed.getTime())) {
@@ -137,11 +145,11 @@ const buildConfigFromEnv = () => ({
     1,
     200000
   ),
-  spatialResDm: parseIntegerEnv(
-    process.env.FIBER_SPATIAL_RES_DM,
-    DEFAULT_SPATIAL_RES_DM,
+  spatialResCmX10: parseIntegerEnv(
+    process.env.FIBER_SPATIAL_RES_CM_X10 || process.env.FIBER_SPATIAL_RES_DM,
+    DEFAULT_SPATIAL_RES_CM_X10,
     1,
-    1000
+    5000
   ),
   totalPoints: parseIntegerEnv(
     process.env.FIBER_TOTAL_POINTS,
@@ -175,9 +183,9 @@ const clearAlarmTableRegisters = () => {
 const applyStaticRegisters = () => {
   const registers = state.holdingRegisters;
   registers[IDX_FIBER_LENGTH_DM] = clampUInt16(state.config.fiberLengthDm);
-  registers[IDX_SPATIAL_RES_DM] = clampUInt16(state.config.spatialResDm);
+  registers[IDX_SPATIAL_RES_CM_X10] = clampUInt16(state.config.spatialResCmX10);
   registers[IDX_TOTAL_POINTS] = clampUInt16(state.config.totalPoints);
-  registers[IDX_RESERVED_40020] = 0;
+  registers[IDX_RESERVED_40019] = 0;
   registers.fill(0, BLOCK_SUMMARY_START, BLOCK_ALARM_START);
 };
 
@@ -197,7 +205,7 @@ const resetRegisterMap = () => {
   state.holdingRegisters[IDX_TOTAL_STRAIN_LOW] = 0;
 };
 
-const normalizeAlarmRecord = (alarm) => {
+const normalizeAlarmRecord = (alarm, fallbackChannelId = 0) => {
   const startDmRaw = Number(alarm?.startDm);
   const endDmRaw = Number(alarm?.endDm);
   const hasStart = Number.isFinite(startDmRaw);
@@ -216,32 +224,48 @@ const normalizeAlarmRecord = (alarm) => {
     normalizedStart
   );
   const endDm = clampUInt16(normalizedEnd);
+  const channelId =
+    normalizeChannelId(alarm?.channelId) || normalizeChannelId(fallbackChannelId);
 
   return {
     alarmType: toAlarmTypeCode(alarm?.alarmType),
+    channelId,
     startDm,
     endDm,
     tempMax: Number(alarm?.tempMax),
     tempMin: Number(alarm?.tempMin),
     strainMax: Number(alarm?.strainMax),
     strainMin: Number(alarm?.strainMin),
-    startAt: alarm?.startAt,
-    updatedAt: alarm?.updatedAt,
   };
+};
+
+const sanitizeTotalPointsRead = (value) => {
+  const numeric = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return clampUInt16(numeric);
+};
+
+const sanitizeSpatialResCmX10 = (value) => {
+  const numeric = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return clampUInt16(numeric);
 };
 
 const writeAlarmSlot = ({
   slotIndex,
   alarmId,
   alarmType,
+  channelId,
   startDm,
   endDm,
   tempMax,
   tempMin,
   strainMax,
   strainMin,
-  startAt,
-  updatedAt,
 }) => {
   if (slotIndex < 0 || slotIndex >= ALARM_SLOT_COUNT) {
     return;
@@ -259,8 +283,7 @@ const writeAlarmSlot = ({
   registers[base + ALARM_TEMP_MIN_X10_OFFSET] = encodeSignedScaledX10(tempMin);
   registers[base + ALARM_STRAIN_MAX_X10_OFFSET] = encodeSignedScaledX10(strainMax);
   registers[base + ALARM_STRAIN_MIN_X10_OFFSET] = encodeSignedScaledX10(strainMin);
-  writeTimestampRegisters(registers, base + ALARM_START_TS_OFFSET, startAt);
-  writeTimestampRegisters(registers, base + ALARM_UPDATE_TS_OFFSET, updatedAt);
+  registers[base + ALARM_CHANNEL_OFFSET] = clampUInt16(channelId);
 };
 
 const clearHandshakeRegisters = ({ keepSequence = true } = {}) => {
@@ -283,6 +306,44 @@ const isTableFrozen = () =>
   state.holdingRegisters[IDX_NEW_DATA_READY] === 1 &&
   state.holdingRegisters[IDX_BUFFER_STATE] === BUFFER_STATE_LOADED;
 
+const splitIntoLoadableAlarmChunks = (alarms) => {
+  const pending = alarms.slice();
+  const chunks = [];
+
+  while (pending.length > 0) {
+    const perChannelCounter = new Map([
+      [1, 0],
+      [2, 0],
+      [3, 0],
+    ]);
+    const selected = [];
+    const remaining = [];
+
+    for (const alarm of pending) {
+      const used = perChannelCounter.get(alarm.channelId) || 0;
+      if (
+        selected.length < ALARM_SLOT_COUNT &&
+        used < ALARM_SLOTS_PER_CHANNEL
+      ) {
+        selected.push(alarm);
+        perChannelCounter.set(alarm.channelId, used + 1);
+      } else {
+        remaining.push(alarm);
+      }
+    }
+
+    if (selected.length === 0) {
+      break;
+    }
+
+    chunks.push(selected);
+    pending.length = 0;
+    pending.push(...remaining);
+  }
+
+  return chunks;
+};
+
 const loadAlarmBatchInternal = (batch) => {
   const alarms = Array.isArray(batch?.alarms) ? batch.alarms : [];
   if (alarms.length === 0) {
@@ -294,12 +355,14 @@ const loadAlarmBatchInternal = (batch) => {
     };
   }
 
+  const batchChannelId = normalizeChannelId(batch?.channelId);
   const normalized = alarms
-    .map(normalizeAlarmRecord)
-    .filter((alarm) => alarm.alarmType > 0)
-    .slice(0, ALARM_SLOT_COUNT);
+    .map((alarm) => normalizeAlarmRecord(alarm, batchChannelId))
+    .filter((alarm) => alarm.alarmType > 0 && alarm.channelId > 0);
+  const chunks = splitIntoLoadableAlarmChunks(normalized);
+  const selected = chunks[0] || [];
 
-  if (normalized.length === 0) {
+  if (selected.length === 0) {
     return {
       accepted: false,
       queued: false,
@@ -310,16 +373,36 @@ const loadAlarmBatchInternal = (batch) => {
 
   const scanAt = parseDateLike(batch?.scanAt);
   const timestamp = scanAt.toISOString();
+  const totalPointsRead = sanitizeTotalPointsRead(batch?.totalPointsRead);
+  const spatialResCmX10 = sanitizeSpatialResCmX10(batch?.spatialResCmX10);
+
+  if (chunks.length > 1) {
+    for (let index = 1; index < chunks.length; index += 1) {
+      enqueueBatch({
+        scanAt: batch?.scanAt,
+        channelId: batchChannelId,
+        totalPointsRead: batch?.totalPointsRead,
+        spatialResCmX10: batch?.spatialResCmX10,
+        alarms: chunks[index],
+      });
+    }
+  }
 
   clearAlarmTableRegisters();
   writeTimestampRegisters(state.holdingRegisters, IDX_LAST_SCAN_YEAR, timestamp);
+  if (totalPointsRead != null) {
+    state.holdingRegisters[IDX_TOTAL_POINTS] = totalPointsRead;
+  }
+  if (spatialResCmX10 != null) {
+    state.holdingRegisters[IDX_SPATIAL_RES_CM_X10] = spatialResCmX10;
+  }
 
   let tempHigh = 0;
   let tempLow = 0;
   let strainHigh = 0;
   let strainLow = 0;
 
-  normalized.forEach((alarm, slotIndex) => {
+  selected.forEach((alarm, slotIndex) => {
     if (alarm.alarmType === 1) tempHigh += 1;
     if (alarm.alarmType === 2) tempLow += 1;
     if (alarm.alarmType === 3) strainHigh += 1;
@@ -329,14 +412,13 @@ const loadAlarmBatchInternal = (batch) => {
       slotIndex,
       alarmId: slotIndex + 1,
       alarmType: alarm.alarmType,
+      channelId: alarm.channelId,
       startDm: alarm.startDm,
       endDm: alarm.endDm,
       tempMax: alarm.tempMax,
       tempMin: alarm.tempMin,
       strainMax: alarm.strainMax,
       strainMin: alarm.strainMin,
-      startAt: alarm.startAt || timestamp,
-      updatedAt: alarm.updatedAt || timestamp,
     });
   });
 
@@ -350,7 +432,7 @@ const loadAlarmBatchInternal = (batch) => {
   state.holdingRegisters[IDX_CLEAR_ALL_CMD] = 0;
   state.holdingRegisters[IDX_BUFFER_STATE] = BUFFER_STATE_LOADED;
   state.holdingRegisters[IDX_BUFFER_SEQUENCE] = clampUInt16(state.bufferSequence);
-  state.holdingRegisters[IDX_TOTAL_ACTIVE_ALARMS] = clampUInt16(normalized.length);
+  state.holdingRegisters[IDX_TOTAL_ACTIVE_ALARMS] = clampUInt16(selected.length);
   state.holdingRegisters[IDX_TOTAL_TEMP_HIGH] = clampUInt16(tempHigh);
   state.holdingRegisters[IDX_TOTAL_TEMP_LOW] = clampUInt16(tempLow);
   state.holdingRegisters[IDX_TOTAL_STRAIN_HIGH] = clampUInt16(strainHigh);
@@ -361,7 +443,7 @@ const loadAlarmBatchInternal = (batch) => {
     queued: false,
     reason: null,
     queueSize: state.pendingBatches.length,
-    loadedCount: normalized.length,
+    loadedCount: selected.length,
   };
 };
 
@@ -707,11 +789,12 @@ export const getModbusPublisherStatus = () => ({
   host: state.config.host,
   port: state.config.port,
   unitId: state.config.unitId,
-  mapStart: 40001,
-  mapEnd: 40240,
+  mapStart: 40000,
+  mapEnd: 40329,
   totalRegisters: HOLDING_REGISTER_COUNT,
   alarmSlotCount: ALARM_SLOT_COUNT,
   alarmSlotSize: ALARM_SLOT_SIZE,
+  alarmSlotsPerChannel: ALARM_SLOTS_PER_CHANNEL,
   systemStatus: state.holdingRegisters[IDX_SYSTEM_STATUS],
   newDataReady: state.holdingRegisters[IDX_NEW_DATA_READY],
   bufferState: state.holdingRegisters[IDX_BUFFER_STATE],
@@ -843,8 +926,7 @@ export const publishModbusPeakEvent = (event) => {
       tempMin: variableType === "tem" ? Number(event?.thresholdValue) : 0,
       strainMax: variableType === "str" ? Number(event?.measuredValue) : 0,
       strainMin: variableType === "str" ? Number(event?.thresholdValue) : 0,
-      startAt: event?.createdAt,
-      updatedAt: event?.createdAt,
+      channelId: normalizeChannelId(event?.channel),
     }))
     .filter(
       (alarm) => Number.isFinite(alarm.startDm) && Number.isFinite(alarm.endDm)
@@ -852,6 +934,7 @@ export const publishModbusPeakEvent = (event) => {
 
   return loadModbusAlarmBatch({
     scanAt: event?.createdAt,
+    channelId: normalizeChannelId(event?.channel),
     alarms,
   }).accepted;
 };
