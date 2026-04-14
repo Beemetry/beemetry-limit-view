@@ -61,6 +61,7 @@ const SECTION_2_X_RANGE = {
 
 const DEFAULT_CHART_TYPE = "tension";
 const DEFAULT_RANGE_MODE = RANGE_MODES.section1;
+const DEFAULT_THRESHOLD_RANGE_MODE = RANGE_MODES.full;
 const DEFAULT_RANGE = CHART_TYPES[DEFAULT_CHART_TYPE];
 const DEFAULT_CHANNEL = "1";
 const CHANNELS = {
@@ -249,17 +250,38 @@ const getThresholdValueWithOffset = (value, offset) => {
   return Number((value + offset).toFixed(3));
 };
 
-const formatAlertTime = (isoValue) => {
+const PERU_TIME_ZONE = "America/Lima";
+
+const formatPeruDateTime = (isoValue) => {
   if (!isoValue) {
-    return "--:--:--";
+    return "--";
   }
 
   const date = new Date(isoValue);
   if (Number.isNaN(date.getTime())) {
-    return "--:--:--";
+    return "--";
   }
 
-  return date.toLocaleTimeString();
+  const formatter = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: PERU_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return formatter.format(date);
+};
+
+const formatAlertTime = (isoValue) => {
+  const fullDateTime = formatPeruDateTime(isoValue);
+  if (fullDateTime === "--") {
+    return "--:--:--";
+  }
+  const timePart = fullDateTime.split(" ")[1];
+  return timePart || "--:--:--";
 };
 
 const getAlertTypeLabel = (typeValue) =>
@@ -660,7 +682,7 @@ const LimitsView = () => {
   const [thresholdLevels, setThresholdLevels] = useState(loadCachedThresholds);
   const [thresholdsHydrated, setThresholdsHydrated] = useState(false);
   const [alerts, setAlerts] = useState([]);
-  const [alertsPanelOpen, setAlertsPanelOpen] = useState(true);
+  const [dismissedAlertIds, setDismissedAlertIds] = useState([]);
   const [soundPanelOpen, setSoundPanelOpen] = useState(true);
   const [soundMuted, setSoundMuted] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
@@ -901,9 +923,14 @@ const LimitsView = () => {
         const levelChannelId = String(
           level.channelId || CHANNELS[DEFAULT_CHANNEL].id
         );
-        return level.type === currentTypeParam && levelChannelId === currentChannelId;
+        const levelRangeMode = level.rangeMode || DEFAULT_THRESHOLD_RANGE_MODE;
+        return (
+          level.type === currentTypeParam &&
+          levelChannelId === currentChannelId &&
+          levelRangeMode === rangeMode
+        );
       }),
-    [currentChannelId, currentTypeParam, sortedThresholdLevels]
+    [currentChannelId, currentTypeParam, rangeMode, sortedThresholdLevels]
   );
 
   const visibleThresholdSeries = useMemo(() => {
@@ -931,6 +958,16 @@ const LimitsView = () => {
     [activeThresholdLevels]
   );
 
+  const dismissedAlertIdSet = useMemo(
+    () => new Set(dismissedAlertIds),
+    [dismissedAlertIds]
+  );
+
+  const visibleAlerts = useMemo(
+    () => alerts.filter((alert) => !dismissedAlertIdSet.has(alert.id)),
+    [alerts, dismissedAlertIdSet]
+  );
+
   const syncPayload = useMemo(
     () =>
       thresholdLevels.map((level) => {
@@ -952,6 +989,7 @@ const LimitsView = () => {
         color: level.color,
         sourceFileId: level.sourceFileId,
         sourceFileIndex: level.sourceFileIndex,
+        rangeMode: level.rangeMode || DEFAULT_THRESHOLD_RANGE_MODE,
         soundEnabled: level.soundEnabled,
         channelId: String(level.channelId || CHANNELS[DEFAULT_CHANNEL].id),
         type: level.type,
@@ -999,12 +1037,13 @@ const LimitsView = () => {
           const levelChannelId = String(
             level.channelId || CHANNELS[DEFAULT_CHANNEL].id
           );
-          if (
-            level.type !== currentTypeParam ||
+        if (
+          level.type !== currentTypeParam ||
             levelChannelId !== currentChannelId ||
+            (level.rangeMode || DEFAULT_THRESHOLD_RANGE_MODE) !== rangeMode ||
             !Array.isArray(level.points)
-          ) {
-            return;
+        ) {
+          return;
           }
 
           level.points.forEach((point) => {
@@ -1038,6 +1077,7 @@ const LimitsView = () => {
       initialStats.yMin,
       isDifferentialView,
       isStdCompareMode,
+      rangeMode,
       thresholdLevels,
     ]
   );
@@ -1272,6 +1312,17 @@ const LimitsView = () => {
   useEffect(() => {
     soundMutedRef.current = soundMuted;
   }, [soundMuted]);
+
+  useEffect(() => {
+    setDismissedAlertIds((previous) => {
+      if (previous.length === 0) {
+        return previous;
+      }
+      const currentIds = new Set(alerts.map((alert) => alert.id));
+      const next = previous.filter((id) => currentIds.has(id));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [alerts]);
 
   useEffect(() => {
     const nextDomain = computeYDomainForRange(xDomain);
@@ -1608,21 +1659,24 @@ const LimitsView = () => {
 
     const lines = [
       [
-        "alerta_id",
+        "iteracion",
         "canal",
         "tipo",
-        "umbral_nombre",
+        "umbral",
         "direccion",
-        "pico_valor",
         "valor_umbral",
+        "pico_valor",
         "pico_metro",
         "tramo_index",
         "inicio_m",
         "fin_m",
         "longitud_m",
+        "pico_tramo",
         "fecha",
       ].join(","),
     ];
+    const toCsvNumber = (value, digits = 3) =>
+      Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "";
 
     alert.segments.forEach((segment, index) => {
       const startDistance = Number(segment?.startDistance);
@@ -1640,19 +1694,20 @@ const LimitsView = () => {
 
       lines.push(
         [
-          alert.id,
+          `"${String(alert.fileId || "").replaceAll('"', '""')}"`,
           alert.channel,
           getAlertTypeLabel(alert.type),
           `"${String(alert.thresholdLabel || "").replaceAll('"', '""')}"`,
           alert.direction === "down" ? "baja" : "alta",
-          Number(alert.measuredValue).toFixed(3),
-          Number(alert.thresholdValue).toFixed(3),
-          Number(alert.distance).toFixed(3),
+          toCsvNumber(alert.thresholdValue),
+          toCsvNumber(alert.measuredValue),
+          toCsvNumber(alert.distance),
           index + 1,
           safeStart,
           safeEnd,
           lengthMeters,
-          `"${alert.createdAt || ""}"`,
+          toCsvNumber(segment?.peakValue ?? alert.measuredValue),
+          `"${formatPeruDateTime(alert.createdAt)}"`,
         ].join(",")
       );
     });
@@ -1677,6 +1732,27 @@ const LimitsView = () => {
     document.body.removeChild(link);
     window.URL.revokeObjectURL(url);
   };
+
+  const handleDismissAlert = useCallback((alertId) => {
+    setDismissedAlertIds((previous) => {
+      if (previous.includes(alertId)) {
+        return previous;
+      }
+      return [...previous, alertId];
+    });
+  }, []);
+
+  const handleClearAlertsFromScreen = useCallback(() => {
+    setDismissedAlertIds((previous) => {
+      const next = new Set(previous);
+      alerts.forEach((alert) => {
+        if (alert?.id) {
+          next.add(alert.id);
+        }
+      });
+      return Array.from(next);
+    });
+  }, [alerts]);
 
   const handleManualReading1Change = (event) => {
     setManualReading1(event.target.value);
@@ -1742,6 +1818,7 @@ const LimitsView = () => {
           ? Number(level.percent) === normalizedPercent
           : Number(level.offsetValue) === normalizedOffset) &&
         level.sourceFileId === sourceFileId &&
+        (level.rangeMode || DEFAULT_THRESHOLD_RANGE_MODE) === rangeMode &&
         level.type === currentTypeParam
     );
     if (alreadyExists) {
@@ -1767,6 +1844,7 @@ const LimitsView = () => {
         color: thresholdColor,
         sourceFileId,
         sourceFileIndex: activeReferenceIndex,
+        rangeMode,
         soundEnabled: thresholdSoundEnabled,
         channelId: currentChannelId,
         type: currentTypeParam,
@@ -2032,123 +2110,112 @@ const LimitsView = () => {
       <div className="flex flex-col flex-1 overflow-y-auto min-h-0">
         <div className="flex-1 p-4 relative min-h-0 bg-slate-100 space-y-3">
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-            {alertsPanelOpen ? (
-              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 min-h-[180px]">
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-800">
-                      Alertas Detectadas
-                    </div>
-                    <div className="text-xs text-slate-500">
-                      Se actualizan cuando entra un archivo nuevo en cualquier canal
-                    </div>
+            <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 min-h-[180px]">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-800">
+                    Alertas Detectadas
                   </div>
-                  <button
-                    onClick={() => setAlertsPanelOpen(false)}
-                    className="text-xs text-slate-400 hover:text-slate-700"
-                  >
-                    Cerrar
-                  </button>
+                  <div className="text-xs text-slate-500">
+                    Se actualizan cuando entra un archivo nuevo en cualquier canal
+                  </div>
                 </div>
+                <button
+                  onClick={handleClearAlertsFromScreen}
+                  className="text-xs text-slate-400 hover:text-slate-700"
+                >
+                  Cerrar
+                </button>
+              </div>
 
-                <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
-                  {alerts.length === 0 ? (
-                    <div className="text-xs text-slate-400 italic">
-                      Sin alertas activas por ahora
-                    </div>
-                  ) : (
-                    alerts.slice(0, 6).map((alert) => (
-                      <div
-                        key={alert.id}
-                        className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs"
-                      >
+              <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+                {visibleAlerts.length === 0 ? (
+                  <div className="text-xs text-slate-400 italic">
+                    Sin alertas visibles por ahora
+                  </div>
+                ) : (
+                  visibleAlerts.slice(0, 6).map((alert) => (
+                    <div
+                      key={alert.id}
+                      className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs"
+                    >
+                      <div className="flex items-start justify-between gap-2">
                         <div className="font-semibold text-red-700">
                           {alert.thresholdLabel}
                         </div>
-                        <div className="text-slate-500">
-                          Canal {alert.channel} |{" "}
-                          {getAlertTypeLabel(alert.type)} |{" "}
-                          {formatAlertTime(alert.createdAt)}
-                        </div>
-                        <div className="text-slate-700">
-                          Pico detectado:{" "}
-                          <span className="font-semibold">
-                            {Number(alert.measuredValue).toFixed(2)}
-                          </span>{" "}
-                          | Umbral:{" "}
-                          <span className="font-semibold">
-                            {alert.direction === "down" ? "<" : ">"}{" "}
-                            {Number(alert.thresholdValue).toFixed(2)}
-                          </span>
-                        </div>
-                        <div className="text-slate-700">
-                          Ubicacion del pico:{" "}
-                          <span className="font-semibold">
-                            {Number(alert.distance).toFixed(2)} m
-                          </span>
-                        </div>
-                        {Array.isArray(alert.segments) && alert.segments.length > 0 && (
-                          <>
-                            <div className="text-slate-600 mt-1">
-                              Tramos detectados:{" "}
-                              <span className="font-semibold">
-                                {alert.segmentCount || alert.segments.length}
-                              </span>
-                            </div>
-                            <div className="text-slate-600">
-                              Vista rapida:{" "}
-                              {alert.segments
-                                .slice(0, 3)
-                                .map(
-                                  (segment) =>
-                                    `${Number(segment.startDistance).toFixed(2)}-${Number(
-                                      segment.endDistance
-                                    ).toFixed(2)} m`
-                                )
-                                .join(" | ")}
-                              {alert.segments.length > 3 ? " | ..." : ""}
-                            </div>
-                            <button
-                              onClick={() => handleDownloadAlertSegments(alert)}
-                              className="mt-2 px-2 py-1 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
-                            >
-                              Descargar tramos CSV
-                            </button>
-                          </>
-                        )}
+                        <button
+                          onClick={() => handleDismissAlert(alert.id)}
+                          className="text-red-400 hover:text-red-700 leading-none px-1"
+                          title="Quitar alerta de pantalla"
+                        >
+                          X
+                        </button>
                       </div>
-                    ))
-                  )}
-                </div>
+                      <div className="text-slate-500">
+                        Canal {alert.channel} | {getAlertTypeLabel(alert.type)} |{" "}
+                        {formatAlertTime(alert.createdAt)}
+                      </div>
+                      <div className="text-slate-700">
+                        Pico detectado:{" "}
+                        <span className="font-semibold">
+                          {Number(alert.measuredValue).toFixed(2)}
+                        </span>{" "}
+                        | Umbral:{" "}
+                        <span className="font-semibold">
+                          {alert.direction === "down" ? "<" : ">"}{" "}
+                          {Number(alert.thresholdValue).toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="text-slate-700">
+                        Ubicacion del pico:{" "}
+                        <span className="font-semibold">
+                          {Number(alert.distance).toFixed(2)} m
+                        </span>
+                      </div>
+                      {Array.isArray(alert.segments) && alert.segments.length > 0 && (
+                        <>
+                          <div className="text-slate-600 mt-1">
+                            Tramos detectados:{" "}
+                            <span className="font-semibold">
+                              {alert.segmentCount || alert.segments.length}
+                            </span>
+                          </div>
+                          <div className="text-slate-600">
+                            Vista rapida:{" "}
+                            {alert.segments
+                              .slice(0, 3)
+                              .map(
+                                (segment) =>
+                                  `${Number(segment.startDistance).toFixed(2)}-${Number(
+                                    segment.endDistance
+                                  ).toFixed(2)} m`
+                              )
+                              .join(" | ")}
+                            {alert.segments.length > 3 ? " | ..." : ""}
+                          </div>
+                          <button
+                            onClick={() => handleDownloadAlertSegments(alert)}
+                            className="mt-2 px-2 py-1 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+                          >
+                            Descargar tramos CSV
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
-            ) : (
-              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 min-h-[180px] flex flex-col justify-center items-start">
-                <div className="text-sm font-semibold text-slate-800">
-                  Alertas Detectadas
-                </div>
-                <div className="text-xs text-slate-500 mb-3">
-                  Panel oculto temporalmente
-                </div>
-                <button
-                  onClick={() => setAlertsPanelOpen(true)}
-                  className="px-3 py-2 rounded-lg bg-slate-800 text-white text-sm"
-                >
-                  Mostrar alertas
-                </button>
-              </div>
-            )}
+            </div>
 
             {soundPanelOpen ? (
               <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                <div className="text-sm font-semibold text-slate-800">
+                  Sonido de Alertas
+                </div>
+                <div className="text-xs text-slate-500">
+                  Umbrales con sonido: {soundThresholdCount}
+                </div>
                 <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-800">
-                      Sonido de Alertas
-                    </div>
-                    <div className="text-xs text-slate-500">
-                      Umbrales con sonido: {soundThresholdCount}
-                    </div>
-                  </div>
                   <button
                     onClick={() => {
                       setSoundPanelOpen(false);
@@ -2382,6 +2449,7 @@ const LimitsView = () => {
             activeReferenceFileId={activeReferenceFileId}
             activeReferenceIndex={activeReferenceIndex}
             comparisonInfo={comparisonInfo}
+            rangeMode={rangeMode}
             zoomSelection={zoomSelection}
             xDomain={xDomain}
             yDomain={yDomain}

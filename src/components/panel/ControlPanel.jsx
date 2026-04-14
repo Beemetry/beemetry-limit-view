@@ -21,6 +21,15 @@ const ControlPanel = ({
 }) => {
   const hasThresholds = thresholdLevels.length > 0;
   const isPercentMode = thresholdMode !== "offset";
+  const getRangeLabel = (rangeMode) => {
+    if (rangeMode === "tramo_1") {
+      return "Tramo 1";
+    }
+    if (rangeMode === "tramo_2") {
+      return "Tramo 2";
+    }
+    return "Completo";
+  };
 
   return (
     <div className="bg-white border-t border-slate-300 shadow-xl z-20 overflow-y-auto flex flex-col max-h-[420px]">
@@ -174,6 +183,7 @@ const ControlPanel = ({
                       <div className="text-slate-400">
                         Canal #{level.channelId || "--"} |{" "}
                         {level.type === "str" ? "Tension" : "Temperatura"} |{" "}
+                        {getRangeLabel(level.rangeMode)} |{" "}
                         {level.direction === "down" ? "Baja" : "Alta"} |{" "}
                         Base: lectura #{level.sourceFileIndex ?? "--"}
                         {level.soundEnabled ? " | sonido" : ""}

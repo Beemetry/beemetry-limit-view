@@ -146,6 +146,8 @@ const sortChronological = (a, b) => {
 
 const getMonitorKey = (channel, type) => `${channel}:${type}`;
 const DEFAULT_THRESHOLD_CHANNEL_ID = "1";
+const THRESHOLD_RANGE_MODES = new Set(["tramo_1", "tramo_2", "completo"]);
+const DEFAULT_THRESHOLD_RANGE_MODE = "completo";
 
 const normalizeDistanceKey = (value) => Number(value).toFixed(3);
 const toFixed3 = (value) => Number(Number(value).toFixed(3));
@@ -439,6 +441,7 @@ const sanitizeAlertForClient = (alert) => ({
   fileId: alert.fileId,
   thresholdId: alert.thresholdId,
   thresholdLabel: alert.thresholdLabel,
+  thresholdRangeMode: alert.thresholdRangeMode,
   thresholdPercent: alert.thresholdPercent,
   measuredValue: alert.measuredValue,
   thresholdValue: alert.thresholdValue,
@@ -448,6 +451,9 @@ const sanitizeAlertForClient = (alert) => ({
     ? alert.segments.map((segment) => ({
         startDistance: segment.startDistance,
         endDistance: segment.endDistance,
+        peakDistance: segment.peakDistance,
+        peakValue: segment.peakValue,
+        peakThresholdValue: segment.peakThresholdValue,
       }))
     : [],
   createdAt: alert.createdAt,
@@ -467,6 +473,9 @@ const buildThresholdLookup = (points) => {
   return lookup;
 };
 
+const normalizeThresholdRangeMode = (value) =>
+  THRESHOLD_RANGE_MODES.has(value) ? value : DEFAULT_THRESHOLD_RANGE_MODE;
+
 const normalizeThreshold = (item) => {
   const type = item?.type === "str" ? "str" : item?.type === "tem" ? "tem" : null;
   const channelId = String(item?.channelId || DEFAULT_THRESHOLD_CHANNEL_ID);
@@ -476,6 +485,7 @@ const normalizeThreshold = (item) => {
   const offsetValue = Number(item?.offsetValue);
   const floor = Number(item?.floor);
   const sourceFileIndex = Number(item?.sourceFileIndex);
+  const rangeMode = normalizeThresholdRangeMode(item?.rangeMode);
   if (!type || !Object.prototype.hasOwnProperty.call(CHANNEL_DIRS, channelId)) {
     return null;
   }
@@ -513,6 +523,7 @@ const normalizeThreshold = (item) => {
     color: typeof item?.color === "string" ? item.color : "#2563eb",
     sourceFileId: typeof item?.sourceFileId === "string" ? item.sourceFileId : "",
     sourceFileIndex: Number.isFinite(sourceFileIndex) ? sourceFileIndex : null,
+    rangeMode,
     soundEnabled: Boolean(item?.soundEnabled),
     points,
     thresholdLabel:
@@ -537,6 +548,7 @@ const serializeThreshold = (threshold) => ({
   color: threshold.color,
   sourceFileId: threshold.sourceFileId,
   sourceFileIndex: threshold.sourceFileIndex,
+  rangeMode: normalizeThresholdRangeMode(threshold.rangeMode),
   soundEnabled: threshold.soundEnabled,
   thresholdLabel: threshold.thresholdLabel,
   direction: threshold.direction,
@@ -802,6 +814,9 @@ const evaluateThresholdsForFile = async ({
       .map((item) => ({
         startDistance: toFixed3(item.startDistance),
         endDistance: toFixed3(item.endDistance),
+        peakDistance: toFixed3(item.peakDistance),
+        peakValue: toFixed3(item.peakMeasuredValue),
+        peakThresholdValue: toFixed3(item.peakThresholdValue),
       }))
       .sort((a, b) => a.startDistance - b.startDistance);
     const comparisonSymbol = threshold.direction === "down" ? "<" : ">";
@@ -820,6 +835,7 @@ const evaluateThresholdsForFile = async ({
       fileId: filename,
       thresholdId: threshold.id,
       thresholdLabel: threshold.thresholdLabel,
+      thresholdRangeMode: normalizeThresholdRangeMode(threshold.rangeMode),
       direction: threshold.direction,
       thresholdPercent: threshold.percent,
       thresholdMode: threshold.mode,

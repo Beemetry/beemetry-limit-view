@@ -34,6 +34,7 @@ const LimitsChart = ({
   activeReferenceFileId,
   activeReferenceIndex,
   comparisonInfo,
+  rangeMode,
   zoomSelection,
   xDomain,
   yDomain,
@@ -48,6 +49,7 @@ const LimitsChart = ({
   const isAnyDifferentialView = isDifferentialView || isManualDifferentialView;
   const isStdCompareMode = !isAnyDifferentialView && noiseMode === "std";
   const isStdDifferentialMode = isAnyDifferentialView && diffNoiseEnabled;
+  const showReturnDistance = isTemperatureChart && rangeMode === "tramo_2";
   const yLabel = isDifferentialView
     ? isTemperatureChart
       ? isStdDifferentialMode
@@ -118,7 +120,7 @@ const LimitsChart = ({
         ? point.distance
         : Number(label);
       const inverseDistance =
-        isTemperatureChart && Number.isFinite(xValue)
+        showReturnDistance && Number.isFinite(xValue)
           ? RETURN_REFERENCE_DISTANCE - xValue
           : null;
       const latestValue = Number(point.latestValue);
@@ -148,22 +150,22 @@ const LimitsChart = ({
                 : "Diferencial"
               : isStdCompareMode
                 ? "Sigma"
-                : activeReferenceIndex ?? "N/A"}
+                : `Iteracion ${activeReferenceIndex ?? "N/A"}`}
           </div>
           <div className="text-slate-600">
-            Distancia aproximada:{" "}
+            Distancia:{" "}
             {Number.isFinite(xValue) ? xValue.toFixed(2) : label} m
           </div>
           <div className="text-slate-800">
             {isAnyDifferentialView
               ? isStdDifferentialMode
-                ? "Desviacion estandar (Y)"
+                ? "Desviacion estandar"
                 : resultLabel
               : isStdCompareMode
-                ? "Desviacion estandar (Y)"
+                ? "Desviacion estandar"
                 : isTemperatureChart
-                  ? "Temperatura (Y)"
-                  : "Tension (Y)"}
+                  ? "Temperatura"
+                  : "Tension"}
             :{" "}
             {Number.isFinite(Number(selected.value))
               ? Number(selected.value).toFixed(3)
@@ -235,6 +237,7 @@ const LimitsChart = ({
       isStdDifferentialMode,
       isTemperatureChart,
       noiseMode,
+      showReturnDistance,
       tooltipFileId,
     ]
   );
@@ -277,12 +280,14 @@ const LimitsChart = ({
                   height={X_AXIS_HEIGHT}
                   tickFormatter={(value) => value.toFixed(0)}
                   label={{
-                    value: "Distancia (m)",
+                    value: showReturnDistance
+                      ? "Distancia de ida (m)"
+                      : "Distancia (m)",
                     position: "insideBottomRight",
                     offset: -5,
                   }}
                 />
-                {isTemperatureChart && (
+                {showReturnDistance && (
                   <XAxis
                     xAxisId="inverseTop"
                     dataKey="distance"
@@ -295,7 +300,7 @@ const LimitsChart = ({
                       (RETURN_REFERENCE_DISTANCE - value).toFixed(0)
                     }
                     label={{
-                      value: "Retorno (m)",
+                      value: "Distancia de regreso (m)",
                       position: "insideTopRight",
                       offset: 0,
                     }}
