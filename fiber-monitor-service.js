@@ -826,6 +826,22 @@ const evaluateThresholdsForFile = async ({
       return;
     }
 
+    const getRangeAbsolutePeak = (range) => {
+      if (threshold.direction === "down") {
+        return {
+          value: range.valueMin,
+          distance: range.minValueDistance,
+          thresholdValue: range.minValueThresholdValue,
+        };
+      }
+
+      return {
+        value: range.valueMax,
+        distance: range.maxValueDistance,
+        thresholdValue: range.maxValueThresholdValue,
+      };
+    };
+
     const sortedRanges = exceededRanges.slice().sort((left, right) => {
       const deltaDifference = right.maxDelta - left.maxDelta;
       if (Math.abs(deltaDifference) > 0.0000001) {
@@ -837,24 +853,48 @@ const evaluateThresholdsForFile = async ({
       }
       return right.peakMeasuredValue - left.peakMeasuredValue;
     });
-    const overallPeakRange = sortedRanges[0] || null;
+
+    const overallPeakRange = sortedRanges.reduce((best, current) => {
+      if (!best) {
+        return current;
+      }
+
+      const bestPeak = getRangeAbsolutePeak(best);
+      const currentPeak = getRangeAbsolutePeak(current);
+      if (threshold.direction === "down") {
+        return currentPeak.value < bestPeak.value ? current : best;
+      }
+      return currentPeak.value > bestPeak.value ? current : best;
+    }, null);
 
     if (!overallPeakRange) {
       return;
     }
 
-    const globalPeakValue = overallPeakRange.peakMeasuredValue;
-    const globalPeakDistance = overallPeakRange.peakDistance;
-    const globalPeakThresholdValue = overallPeakRange.peakThresholdValue;
+    const globalPeak = getRangeAbsolutePeak(overallPeakRange);
+    const globalPeakValue = globalPeak.value;
+    const globalPeakDistance = globalPeak.distance;
+    const globalPeakThresholdValue = globalPeak.thresholdValue;
 
     const rangeSnapshots = sortedRanges
       .slice(0, MODBUS_EVENT_RANGE_SNAPSHOT_LIMIT)
       .map((item) => ({
+        ...getRangeAbsolutePeak(item),
         startDistance: toFixed3(item.startDistance),
         endDistance: toFixed3(item.endDistance),
-        peakDistance: toFixed3(item.peakDistance),
-        peakValue: toFixed3(item.peakMeasuredValue),
-        peakThresholdValue: toFixed3(item.peakThresholdValue),
+        peakDistance: toFixed3(
+          threshold.direction === "down"
+            ? item.minValueDistance
+            : item.maxValueDistance
+        ),
+        peakValue: toFixed3(
+          threshold.direction === "down" ? item.valueMin : item.valueMax
+        ),
+        peakThresholdValue: toFixed3(
+          threshold.direction === "down"
+            ? item.minValueThresholdValue
+            : item.maxValueThresholdValue
+        ),
         minValue: toFixed3(item.valueMin),
         maxValue: toFixed3(item.valueMax),
       }))
