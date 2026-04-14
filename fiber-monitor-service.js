@@ -663,6 +663,7 @@ const setThresholds = (thresholds) => {
 
 const buildExceededRangesByThreshold = ({ filePoints, lookup, direction }) => {
   const isLowerDirection = direction === "down";
+  const EPSILON = 0.0000001;
   const ranges = [];
   let activeRange = null;
 
@@ -701,14 +702,35 @@ const buildExceededRangesByThreshold = ({ filePoints, lookup, direction }) => {
         peakThresholdValue: thresholdValue,
         valueMin: measuredValue,
         valueMax: measuredValue,
+        minValueDistance: point.distance,
+        maxValueDistance: point.distance,
+        minValueThresholdValue: thresholdValue,
+        maxValueThresholdValue: thresholdValue,
       };
       continue;
     }
 
     activeRange.endDistance = point.distance;
-    activeRange.valueMin = Math.min(activeRange.valueMin, measuredValue);
-    activeRange.valueMax = Math.max(activeRange.valueMax, measuredValue);
-    if (delta > activeRange.maxDelta) {
+    if (measuredValue < activeRange.valueMin) {
+      activeRange.valueMin = measuredValue;
+      activeRange.minValueDistance = point.distance;
+      activeRange.minValueThresholdValue = thresholdValue;
+    }
+    if (measuredValue > activeRange.valueMax) {
+      activeRange.valueMax = measuredValue;
+      activeRange.maxValueDistance = point.distance;
+      activeRange.maxValueThresholdValue = thresholdValue;
+    }
+    const hasHigherDelta = delta > activeRange.maxDelta + EPSILON;
+    const hasEqualDelta = Math.abs(delta - activeRange.maxDelta) <= EPSILON;
+    const isMoreExtremeAtEqualDelta =
+      hasEqualDelta &&
+      ((isLowerDirection &&
+        measuredValue < Number(activeRange.peakMeasuredValue)) ||
+        (!isLowerDirection &&
+          measuredValue > Number(activeRange.peakMeasuredValue)));
+
+    if (hasHigherDelta || isMoreExtremeAtEqualDelta) {
       activeRange.maxDelta = delta;
       activeRange.peakDistance = point.distance;
       activeRange.peakMeasuredValue = measuredValue;
@@ -804,10 +826,26 @@ const evaluateThresholdsForFile = async ({
       return;
     }
 
-    const sortedRanges = exceededRanges
-      .slice()
-      .sort((left, right) => right.maxDelta - left.maxDelta);
-    const maxHit = sortedRanges[0];
+    const sortedRanges = exceededRanges.slice().sort((left, right) => {
+      const deltaDifference = right.maxDelta - left.maxDelta;
+      if (Math.abs(deltaDifference) > 0.0000001) {
+        return deltaDifference;
+      }
+
+      if (threshold.direction === "down") {
+        return left.peakMeasuredValue - right.peakMeasuredValue;
+      }
+      return right.peakMeasuredValue - left.peakMeasuredValue;
+    });
+    const overallPeakRange = sortedRanges[0] || null;
+
+    if (!overallPeakRange) {
+      return;
+    }
+
+    const globalPeakValue = overallPeakRange.peakMeasuredValue;
+    const globalPeakDistance = overallPeakRange.peakDistance;
+    const globalPeakThresholdValue = overallPeakRange.peakThresholdValue;
 
     const rangeSnapshots = sortedRanges
       .slice(0, MODBUS_EVENT_RANGE_SNAPSHOT_LIMIT)
@@ -817,6 +855,8 @@ const evaluateThresholdsForFile = async ({
         peakDistance: toFixed3(item.peakDistance),
         peakValue: toFixed3(item.peakMeasuredValue),
         peakThresholdValue: toFixed3(item.peakThresholdValue),
+        minValue: toFixed3(item.valueMin),
+        maxValue: toFixed3(item.valueMax),
       }))
       .sort((a, b) => a.startDistance - b.startDistance);
     const comparisonSymbol = threshold.direction === "down" ? "<" : ">";
@@ -840,17 +880,17 @@ const evaluateThresholdsForFile = async ({
       thresholdPercent: threshold.percent,
       thresholdMode: threshold.mode,
       thresholdOffset: threshold.offsetValue,
-      measuredValue: toFixed3(maxHit.peakMeasuredValue),
-      thresholdValue: toFixed3(maxHit.peakThresholdValue),
-      distance: toFixed3(maxHit.peakDistance),
+      measuredValue: toFixed3(globalPeakValue),
+      thresholdValue: toFixed3(globalPeakThresholdValue),
+      distance: toFixed3(globalPeakDistance),
       segmentCount: rangeSnapshots.length,
       segments: rangeSnapshots,
       createdAt: new Date().toISOString(),
       soundEnabled: threshold.soundEnabled,
       message:
         `Alerta ${type.toUpperCase()} | Canal ${channel} | ${threshold.thresholdLabel} | ` +
-        `Lectura ${maxHit.peakMeasuredValue.toFixed(2)} ${comparisonSymbol} ${maxHit.peakThresholdValue.toFixed(2)} ` +
-        `en ${maxHit.peakDistance.toFixed(2)} m | Tramos: ${rangeSummary}`,
+        `Lectura ${globalPeakValue.toFixed(2)} ${comparisonSymbol} ${globalPeakThresholdValue.toFixed(2)} ` +
+        `en ${globalPeakDistance.toFixed(2)} m | Tramos: ${rangeSummary}`,
     };
 
     pushAlert(alert);
