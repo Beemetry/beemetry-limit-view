@@ -1,7 +1,7 @@
 import net from "net";
 
 const DEFAULT_MODBUS_HOST = "0.0.0.0";
-const DEFAULT_MODBUS_PORT = 1502;
+const DEFAULT_MODBUS_PORT = 502;
 const DEFAULT_MODBUS_UNIT_ID = 1;
 const DEFAULT_MAX_PENDING_BATCHES = 200;
 const DEFAULT_FIBER_LENGTH_DM = 800;
@@ -133,6 +133,7 @@ const buildConfigFromEnv = () => ({
   host: process.env.MODBUS_HOST || DEFAULT_MODBUS_HOST,
   port: parseIntegerEnv(process.env.MODBUS_PORT, DEFAULT_MODBUS_PORT, 1, 65535),
   unitId: parseIntegerEnv(process.env.MODBUS_UNIT_ID, DEFAULT_MODBUS_UNIT_ID, 1, 247),
+  ignoreUnitId: parseBooleanEnv(process.env.MODBUS_IGNORE_UNIT_ID, false),
   maxPendingBatches: parseIntegerEnv(
     process.env.MODBUS_MAX_PENDING_BATCHES,
     DEFAULT_MAX_PENDING_BATCHES,
@@ -691,7 +692,7 @@ const handleRequestFrame = (socket, frame) => {
   if (protocolId !== 0 || !functionCode) {
     return;
   }
-  if (unitId !== state.config.unitId) {
+  if (!state.config.ignoreUnitId && unitId !== state.config.unitId) {
     sendException({
       socket,
       transactionId,
@@ -789,6 +790,7 @@ export const getModbusPublisherStatus = () => ({
   host: state.config.host,
   port: state.config.port,
   unitId: state.config.unitId,
+  ignoreUnitId: state.config.ignoreUnitId,
   mapStart: 40000,
   mapEnd: 40329,
   totalRegisters: HOLDING_REGISTER_COUNT,
