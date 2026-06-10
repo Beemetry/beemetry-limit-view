@@ -15,15 +15,15 @@ const CHART_TYPES = {
     key: "tension",
     label: "Grafico Tension",
     xMin: 0,
-    xMax: 810,
+    xMax: 806,
     yMin: -1600,
     yMax: 1600,
   },
   temperatura: {
     key: "temperatura",
     label: "Grafico Temperatura",
-    xMin: 810,
-    xMax: 1620,
+    xMin: 812,
+    xMax: 1605,
     yMin: -50,
     yMax: 150,
   },
@@ -48,15 +48,15 @@ const THRESHOLD_MODES = {
 };
 const FULL_X_RANGE = {
   xMin: 0,
-  xMax: 1620,
+  xMax: 1605,
 };
 const SECTION_1_X_RANGE = {
   xMin: 0,
-  xMax: 810,
+  xMax: 806,
 };
 const SECTION_2_X_RANGE = {
-  xMin: 810,
-  xMax: 1620,
+  xMin: 812,
+  xMax: 1605,
 };
 
 const DEFAULT_CHART_TYPE = "tension";

@@ -16,7 +16,7 @@ import {
   X_AXIS_HEIGHT,
 } from "../../config/chartConfig";
 
-const RETURN_REFERENCE_DISTANCE = 1620;
+const RETURN_REFERENCE_DISTANCE = 1605;
 
 const LimitsChart = ({
   hasData,
