@@ -297,6 +297,50 @@ const buildDifferentialRows = ({
     .sort((a, b) => a.distance - b.distance);
 };
 
+const buildStdSeriesFromPointSets = (pointSets) => {
+  const samplesByDistance = new Map();
+
+  pointSets.forEach((points) => {
+    points.forEach((point) => {
+      if (
+        point.temperature == null ||
+        Number.isNaN(point.temperature) ||
+        !Number.isFinite(point.distance)
+      ) {
+        return;
+      }
+
+      const key = normalizeDistanceKey(point.distance);
+      if (!samplesByDistance.has(key)) {
+        samplesByDistance.set(key, {
+          distance: point.distance,
+          values: [],
+        });
+      }
+      samplesByDistance.get(key).values.push(point.temperature);
+    });
+  });
+
+  return Array.from(samplesByDistance.values())
+    .map((entry) => {
+      const n = entry.values.length;
+      if (n === 0) {
+        return null;
+      }
+
+      const mean = entry.values.reduce((sum, value) => sum + value, 0) / n;
+      const variance =
+        entry.values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / n;
+
+      return {
+        distance: entry.distance,
+        temperature: Number(Math.sqrt(variance).toFixed(6)),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.distance - b.distance);
+};
+
 const buildComparisonPayload = async ({ dataDir, selectedFiles, range }) => {
   let combined = [];
 
@@ -796,18 +840,53 @@ const evaluateThresholdsForFile = async ({
     return;
   }
 
-  const fullPath = path.join(dataRoot, channelDir, filename);
-  const rawFilePoints = await parseFilePoints(fullPath);
-  if (rawFilePoints.length === 0) {
+  const dataDir = path.join(dataRoot, channelDir);
+  let selectedFiles = [];
+  try {
+    const files = await fs.readdir(dataDir);
+    selectedFiles = selectRecentFiles(files, type).selected;
+  } catch (error) {
+    console.error("Error reading channel files for std alert evaluation", error);
     return;
   }
-  const filePoints = rawFilePoints.map((point) => ({
-    ...point,
-    temperature:
-      point.temperature == null || Number.isNaN(Number(point.temperature))
-        ? point.temperature
-        : Number((Number(point.temperature) / MONITOR_VALUE_DIVISOR).toFixed(6)),
-  }));
+
+  if (!selectedFiles.includes(filename)) {
+    selectedFiles = [...selectedFiles, filename].sort((left, right) => {
+      const leftKey = getSortKeyFromName(left);
+      const rightKey = getSortKeyFromName(right);
+      if (leftKey !== rightKey) {
+        return leftKey.localeCompare(rightKey);
+      }
+      return left.localeCompare(right);
+    });
+  }
+
+  const pointSets = [];
+  for (const selectedFile of selectedFiles) {
+    const rawPoints = await parseFilePoints(path.join(dataDir, selectedFile));
+    if (rawPoints.length === 0) {
+      continue;
+    }
+
+    pointSets.push(
+      rawPoints.map((point) => ({
+        ...point,
+        temperature:
+          point.temperature == null || Number.isNaN(Number(point.temperature))
+            ? point.temperature
+            : Number((Number(point.temperature) / MONITOR_VALUE_DIVISOR).toFixed(6)),
+      }))
+    );
+  }
+
+  if (pointSets.length === 0) {
+    return;
+  }
+
+  const filePoints = buildStdSeriesFromPointSets(pointSets);
+  if (filePoints.length === 0) {
+    return;
+  }
 
   const modbusAlarmCandidates = [];
   const detectedAt = new Date().toISOString();

@@ -50,6 +50,7 @@ const LimitsChart = ({
   const isStdCompareMode = !isAnyDifferentialView && noiseMode === "std";
   const isStdDifferentialMode = isAnyDifferentialView && diffNoiseEnabled;
   const showReturnDistance = isTemperatureChart && rangeMode === "tramo_2";
+  const yAxisWidth = isTemperatureChart ? Y_AXIS_WIDTH : Y_AXIS_WIDTH + 10;
   const yLabel = isDifferentialView
     ? isTemperatureChart
       ? isStdDifferentialMode
@@ -69,7 +70,7 @@ const LimitsChart = ({
       : isStdCompareMode
         ? isTemperatureChart
           ? "Desviacion estandar (sigma) Temperatura"
-          : "Desviacion estandar (sigma) Tension"
+          : "Desviacion estandar (sigma) Tension (uE)"
       : isTemperatureChart
         ? "Temperatura (C)"
         : "Tension (uE)";
@@ -312,7 +313,7 @@ const LimitsChart = ({
                 <YAxis
                   domain={yDomain}
                   allowDataOverflow={true}
-                  width={Y_AXIS_WIDTH}
+                  width={yAxisWidth}
                   label={{
                     value: yLabel,
                     angle: -90,
