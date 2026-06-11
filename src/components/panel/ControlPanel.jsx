@@ -2,8 +2,6 @@ import React from "react";
 import { Plus, Trash2 } from "lucide-react";
 
 const ControlPanel = ({
-  thresholdMode,
-  onThresholdModeChange,
   thresholdDirection,
   onThresholdDirectionChange,
   thresholdName,
@@ -20,7 +18,6 @@ const ControlPanel = ({
   onRemoveThreshold,
 }) => {
   const hasThresholds = thresholdLevels.length > 0;
-  const isPercentMode = thresholdMode !== "offset";
   const getRangeLabel = (rangeMode) => {
     if (rangeMode === "tramo_1") {
       return "Tramo 1";
@@ -63,20 +60,6 @@ const ControlPanel = ({
           <div className="grid grid-cols-[1fr_120px] gap-3">
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-slate-500 uppercase">
-                Tipo
-              </label>
-              <select
-                className="w-full text-sm px-3 py-2 rounded border border-slate-200 bg-white"
-                value={thresholdMode}
-                onChange={(event) => onThresholdModeChange(event.target.value)}
-              >
-                <option value="percent">Porcentaje</option>
-                <option value="offset">Sumatoria (+)</option>
-              </select>
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-500 uppercase">
                 Direccion
               </label>
               <select
@@ -91,13 +74,13 @@ const ControlPanel = ({
 
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-slate-500 uppercase">
-                {isPercentMode ? "Porcentaje" : "Sumatoria"}
+                Sumatoria
               </label>
               <div className="relative">
                 <input
                   type="number"
-                  min={isPercentMode ? "0.1" : "0.01"}
-                  step={isPercentMode ? "0.1" : "0.01"}
+                  min="0.01"
+                  step="0.01"
                   className="w-full text-sm px-3 py-2 rounded border border-slate-200 bg-white pr-8"
                   value={thresholdInput}
                   onChange={(event) =>
@@ -106,7 +89,7 @@ const ControlPanel = ({
                   onKeyDown={onThresholdInputKeyDown}
                 />
                 <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
-                  {isPercentMode ? "%" : "+"}
+                  +
                 </span>
               </div>
             </div>
@@ -171,15 +154,9 @@ const ControlPanel = ({
                       <div className="font-semibold text-slate-800">
                         {level.thresholdLabel}
                       </div>
-                      {level.mode === "offset" ? (
-                        <div className="text-slate-500">
-                          Sumatoria fija: +{Number(level.offsetValue || 0).toFixed(2)}
-                        </div>
-                      ) : (
-                        <div className="text-slate-500">
-                          Piso minimo: {Number(level.floor || 0).toFixed(2)}
-                        </div>
-                      )}
+                      <div className="text-slate-500">
+                        Sumatoria fija: +{Number(level.offsetValue || 0).toFixed(2)}
+                      </div>
                       <div className="text-slate-400">
                         Canal #{level.channelId || "--"} |{" "}
                         {level.type === "str" ? "Tension" : "Temperatura"} |{" "}

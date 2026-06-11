@@ -66,6 +66,7 @@ const TIMESTAMP_IN_NAME_REGEX = /(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)/;
 const ALERT_HISTORY_LIMIT = 100;
 const WATCH_DEBOUNCE_MS = 400;
 const ALERT_KEY_PERSIST_DEBOUNCE_MS = 300;
+const MONITOR_VALUE_DIVISOR = 5;
 const MODBUS_EVENT_RANGE_SNAPSHOT_LIMIT = Math.max(
   1,
   Math.min(
@@ -479,9 +480,8 @@ const normalizeThresholdRangeMode = (value) =>
 const normalizeThreshold = (item) => {
   const type = item?.type === "str" ? "str" : item?.type === "tem" ? "tem" : null;
   const channelId = String(item?.channelId || DEFAULT_THRESHOLD_CHANNEL_ID);
-  const mode = item?.mode === "offset" ? "offset" : "percent";
+  const mode = "offset";
   const direction = item?.direction === "down" ? "down" : "up";
-  const percent = Number(item?.percent);
   const offsetValue = Number(item?.offsetValue);
   const floor = Number(item?.floor);
   const sourceFileIndex = Number(item?.sourceFileIndex);
@@ -489,10 +489,7 @@ const normalizeThreshold = (item) => {
   if (!type || !Object.prototype.hasOwnProperty.call(CHANNEL_DIRS, channelId)) {
     return null;
   }
-  if (mode === "percent" && !Number.isFinite(percent)) {
-    return null;
-  }
-  if (mode === "offset" && !Number.isFinite(offsetValue)) {
+  if (!Number.isFinite(offsetValue)) {
     return null;
   }
 
@@ -517,8 +514,8 @@ const normalizeThreshold = (item) => {
     channelId,
     type,
     mode,
-    percent: mode === "percent" ? Number(percent.toFixed(1)) : null,
-    offsetValue: mode === "offset" ? Number(offsetValue.toFixed(3)) : null,
+    percent: null,
+    offsetValue: Number(offsetValue.toFixed(3)),
     floor: Number.isFinite(floor) ? floor : 0,
     color: typeof item?.color === "string" ? item.color : "#2563eb",
     sourceFileId: typeof item?.sourceFileId === "string" ? item.sourceFileId : "",
@@ -529,9 +526,7 @@ const normalizeThreshold = (item) => {
     thresholdLabel:
       typeof item?.thresholdLabel === "string" && item.thresholdLabel.trim()
         ? item.thresholdLabel.trim()
-        : mode === "percent"
-          ? `Umbral al ${Number(percent).toFixed(1)}%`
-          : `Umbral +${Number(offsetValue).toFixed(3)}`,
+        : `Umbral +${Number(offsetValue).toFixed(3)}`,
     direction,
     lookup: buildThresholdLookup(points),
   };
@@ -802,10 +797,17 @@ const evaluateThresholdsForFile = async ({
   }
 
   const fullPath = path.join(dataRoot, channelDir, filename);
-  const filePoints = await parseFilePoints(fullPath);
-  if (filePoints.length === 0) {
+  const rawFilePoints = await parseFilePoints(fullPath);
+  if (rawFilePoints.length === 0) {
     return;
   }
+  const filePoints = rawFilePoints.map((point) => ({
+    ...point,
+    temperature:
+      point.temperature == null || Number.isNaN(Number(point.temperature))
+        ? point.temperature
+        : Number((Number(point.temperature) / MONITOR_VALUE_DIVISOR).toFixed(6)),
+  }));
 
   const modbusAlarmCandidates = [];
   const detectedAt = new Date().toISOString();

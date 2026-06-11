@@ -61,19 +61,19 @@ const SECTION_2_X_RANGE = {
 
 const DEFAULT_CHART_TYPE = "tension";
 const DEFAULT_RANGE_MODE = RANGE_MODES.section1;
-const DEFAULT_THRESHOLD_RANGE_MODE = RANGE_MODES.full;
+const DEFAULT_THRESHOLD_RANGE_MODE = RANGE_MODES.section1;
 const DEFAULT_RANGE = CHART_TYPES[DEFAULT_CHART_TYPE];
-const DEFAULT_CHANNEL = "1";
+const DEFAULT_CHANNEL = "2";
 const CHANNELS = {
-  "1": { id: "1", label: "Canal 1", color: "#7c3aed" },
-  "2": { id: "2", label: "Canal 2", color: "#22c55e" },
-  "2_div5": {
-    id: "2",
-    label: "Canal 2 (/5)",
-    color: "#22c55e",
+  "1": {
+    id: "1",
+    label: "Canal 1",
+    color: "#7c3aed",
     valueDivisor: 5,
+    disabled: true,
   },
-  "3": { id: "3", label: "Canal 3", color: "#b45309" },
+  "2": { id: "2", label: "Canal 2", color: "#22c55e", valueDivisor: 5 },
+  "3": { id: "3", label: "Canal 3", color: "#b45309", valueDivisor: 5 },
 };
 const THRESHOLD_COLORS = [
   "#2563eb",
@@ -84,7 +84,6 @@ const THRESHOLD_COLORS = [
   "#f97316",
 ];
 const DEFAULT_THRESHOLD_INPUT = "20";
-const DEFAULT_THRESHOLD_MODE = THRESHOLD_MODES.percent;
 const MAX_CHART_POINTS = 4000;
 const FLOOR_REFERENCE_PERCENT = 20;
 const FLOOR_AT_REFERENCE_PERCENT = 5;
@@ -101,6 +100,9 @@ const EMPTY_COMPARISON_INFO = {
   differentialReady: false,
   message: null,
 };
+
+const getRangeModeForChartType = (type) =>
+  type === "temperatura" ? RANGE_MODES.section2 : RANGE_MODES.section1;
 
 const lttbSegment = (segment, threshold) => {
   const dataLength = segment.length;
@@ -653,7 +655,13 @@ const loadCachedThresholds = () => {
     }
 
     const parsed = JSON.parse(rawValue);
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (level) =>
+            (level?.mode || THRESHOLD_MODES.offset) === THRESHOLD_MODES.offset &&
+            Number.isFinite(Number(level?.offsetValue))
+        )
+      : [];
   } catch {
     return [];
   }
@@ -673,7 +681,6 @@ const LimitsView = () => {
   const [manualReading2, setManualReading2] = useState("");
   const [fileVisibility, setFileVisibility] = useState({});
   const [hideUnselected, setHideUnselected] = useState(false);
-  const [thresholdMode, setThresholdMode] = useState(DEFAULT_THRESHOLD_MODE);
   const [thresholdDirection, setThresholdDirection] = useState("up");
   const [thresholdName, setThresholdName] = useState("");
   const [thresholdInput, setThresholdInput] = useState(DEFAULT_THRESHOLD_INPUT);
@@ -778,6 +785,12 @@ const LimitsView = () => {
       endX: null,
     });
   }, []);
+
+  useEffect(() => {
+    if (CHANNELS[channel]?.disabled) {
+      setChannel(DEFAULT_CHANNEL);
+    }
+  }, [channel]);
 
   const processedData = useMemo(() => {
     if (!Array.isArray(data) || data.length === 0) {
@@ -971,33 +984,25 @@ const LimitsView = () => {
   const syncPayload = useMemo(
     () =>
       thresholdLevels.map((level) => {
-        const mode =
-          level.mode === THRESHOLD_MODES.offset
-            ? THRESHOLD_MODES.offset
-            : THRESHOLD_MODES.percent;
+        const mode = THRESHOLD_MODES.offset;
 
         return {
-        id: level.id,
-        percent: mode === THRESHOLD_MODES.percent ? level.percent : null,
-        offsetValue:
-          mode === THRESHOLD_MODES.offset
-            ? Number(level.offsetValue)
-            : Number.isFinite(Number(level.offsetValue))
-              ? Number(level.offsetValue)
-              : null,
-        floor: level.floor,
-        color: level.color,
-        sourceFileId: level.sourceFileId,
-        sourceFileIndex: level.sourceFileIndex,
-        rangeMode: level.rangeMode || DEFAULT_THRESHOLD_RANGE_MODE,
-        soundEnabled: level.soundEnabled,
-        channelId: String(level.channelId || CHANNELS[DEFAULT_CHANNEL].id),
-        type: level.type,
-        mode,
-        direction: level.direction === "down" ? "down" : "up",
-        thresholdLabel: level.thresholdLabel,
-        points: level.points,
-      };
+          id: level.id,
+          percent: null,
+          offsetValue: Number(level.offsetValue),
+          floor: level.floor,
+          color: level.color,
+          sourceFileId: level.sourceFileId,
+          sourceFileIndex: level.sourceFileIndex,
+          rangeMode: level.rangeMode || DEFAULT_THRESHOLD_RANGE_MODE,
+          soundEnabled: level.soundEnabled,
+          channelId: String(level.channelId || CHANNELS[DEFAULT_CHANNEL].id),
+          type: level.type,
+          mode,
+          direction: level.direction === "down" ? "down" : "up",
+          thresholdLabel: level.thresholdLabel,
+          points: level.points,
+        };
       }),
     [thresholdLevels]
   );
@@ -1509,6 +1514,7 @@ const LimitsView = () => {
 
   const handleChartTypeChange = (type) => {
     setChartType(type);
+    setRangeMode(getRangeModeForChartType(type));
   };
 
   const handleViewModeChange = (event) => {
@@ -1523,17 +1529,9 @@ const LimitsView = () => {
   };
 
   const handleChannelChange = (event) => {
-    setChannel(event.target.value);
-  };
-
-  const handleRangeModeChange = (event) => {
-    const value = event.target.value;
-    if (
-      value === RANGE_MODES.section1 ||
-      value === RANGE_MODES.section2 ||
-      value === RANGE_MODES.full
-    ) {
-      setRangeMode(value);
+    const nextChannel = event.target.value;
+    if (!CHANNELS[nextChannel]?.disabled) {
+      setChannel(nextChannel);
     }
   };
 
@@ -1541,15 +1539,6 @@ const LimitsView = () => {
     const value = event.target.value;
     if (value === NOISE_MODES.raw || value === NOISE_MODES.std) {
       setNoiseMode(value);
-    }
-  };
-
-  const handleThresholdModeChange = (value) => {
-    if (
-      value === THRESHOLD_MODES.percent ||
-      value === THRESHOLD_MODES.offset
-    ) {
-      setThresholdMode(value);
     }
   };
 
@@ -1776,10 +1765,7 @@ const LimitsView = () => {
       return;
     }
 
-    const selectedMode =
-      thresholdMode === THRESHOLD_MODES.offset
-        ? THRESHOLD_MODES.offset
-        : THRESHOLD_MODES.percent;
+    const selectedMode = THRESHOLD_MODES.offset;
 
     const referencePoints = processedData
       .filter(
@@ -1791,9 +1777,7 @@ const LimitsView = () => {
       .map((point) => ({
         distance: point.distance,
         thresholdValue:
-          selectedMode === THRESHOLD_MODES.offset
-            ? getThresholdValueWithOffset(point.temperature, parsed)
-            : getThresholdValue(point.temperature, parsed),
+          getThresholdValueWithOffset(point.temperature, parsed),
       }))
       .filter((point) => Number.isFinite(point.thresholdValue));
 
@@ -1801,22 +1785,16 @@ const LimitsView = () => {
       return;
     }
 
-    const normalizedPercent =
-      selectedMode === THRESHOLD_MODES.percent
-        ? Number(parsed.toFixed(1))
-        : null;
-    const normalizedOffset =
-      selectedMode === THRESHOLD_MODES.offset ? Number(parsed.toFixed(3)) : null;
+    const normalizedPercent = null;
+    const normalizedOffset = Number(parsed.toFixed(3));
     const normalizedName = thresholdName.trim();
     const alreadyExists = thresholdLevels.some(
       (level) =>
         String(level.channelId || CHANNELS[DEFAULT_CHANNEL].id) ===
           currentChannelId &&
-        (level.mode || THRESHOLD_MODES.percent) === selectedMode &&
+        (level.mode || THRESHOLD_MODES.offset) === selectedMode &&
         (level.direction === "down" ? "down" : "up") === thresholdDirection &&
-        (selectedMode === THRESHOLD_MODES.percent
-          ? Number(level.percent) === normalizedPercent
-          : Number(level.offsetValue) === normalizedOffset) &&
+        Number(level.offsetValue) === normalizedOffset &&
         level.sourceFileId === sourceFileId &&
         (level.rangeMode || DEFAULT_THRESHOLD_RANGE_MODE) === rangeMode &&
         level.type === currentTypeParam
@@ -1837,10 +1815,7 @@ const LimitsView = () => {
         offsetValue: normalizedOffset,
         mode: selectedMode,
         direction: thresholdDirection,
-        floor:
-          selectedMode === THRESHOLD_MODES.percent
-            ? Number(getThresholdFloor(normalizedPercent).toFixed(2))
-            : 0,
+        floor: 0,
         color: thresholdColor,
         sourceFileId,
         sourceFileIndex: activeReferenceIndex,
@@ -1849,10 +1824,7 @@ const LimitsView = () => {
         channelId: currentChannelId,
         type: currentTypeParam,
         thresholdLabel:
-          normalizedName ||
-          (selectedMode === THRESHOLD_MODES.percent
-            ? `Umbral al ${normalizedPercent.toFixed(1)}%`
-            : `Umbral +${normalizedOffset.toFixed(3)}`),
+          normalizedName || `Umbral +${normalizedOffset.toFixed(3)}`,
         points: referencePoints,
       },
     ]);
@@ -2053,24 +2025,19 @@ const LimitsView = () => {
             className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
           >
             {Object.entries(CHANNELS).map(([channelKey, channelOption]) => (
-              <option key={channelKey} value={channelKey}>
+              <option
+                key={channelKey}
+                value={channelKey}
+                disabled={channelOption.disabled}
+              >
                 {channelOption.label}
               </option>
             ))}
           </select>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-slate-600">Tramo:</span>
-          <select
-            value={rangeMode}
-            onChange={handleRangeModeChange}
-            className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
-          >
-            <option value={RANGE_MODES.full}>Vista completa</option>
-            <option value={RANGE_MODES.section1}>Tramo 1</option>
-            <option value={RANGE_MODES.section2}>Tramo 2</option>
-          </select>
-        </div>
+        <span className="text-xs px-3 py-2 rounded-md bg-slate-100 text-slate-600">
+          {rangeMode === RANGE_MODES.section2 ? "Tramo 2" : "Tramo 1"}
+        </span>
         {isDifferentialView && (
           <label className="flex items-center gap-2 text-xs text-slate-600 whitespace-nowrap">
             <input
@@ -2462,8 +2429,6 @@ const LimitsView = () => {
 
         {!isDifferentialView && (
           <ControlPanel
-            thresholdMode={thresholdMode}
-            onThresholdModeChange={handleThresholdModeChange}
             thresholdDirection={thresholdDirection}
             onThresholdDirectionChange={handleThresholdDirectionChange}
             thresholdName={thresholdName}
