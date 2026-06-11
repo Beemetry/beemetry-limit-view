@@ -68,7 +68,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), fiberMonitorApiPlugin()],
   server: {
     host: true,
-    allowedHosts: "all",
+    allowedHosts: true,
     fs: {
       allow: [
         DATA_ROOT,
