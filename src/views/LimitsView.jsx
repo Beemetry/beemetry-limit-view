@@ -1854,7 +1854,7 @@ const LimitsView = () => {
         return null;
       }
 
-      const yAxisWidth = chartType === "tension" ? Y_AXIS_WIDTH + 15 : Y_AXIS_WIDTH;
+      const yAxisWidth = Y_AXIS_WIDTH + 15;
       const gridLeft = CHART_MARGINS.left + yAxisWidth;
       const gridWidth =
         rect.width - CHART_MARGINS.left - CHART_MARGINS.right - yAxisWidth;
@@ -1867,7 +1867,7 @@ const LimitsView = () => {
 
       return Math.round(xValue);
     },
-    [chartType, xDomain]
+    [xDomain]
   );
 
   const handleMouseDown = (event) => {

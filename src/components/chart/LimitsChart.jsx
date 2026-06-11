@@ -50,7 +50,7 @@ const LimitsChart = ({
   const isStdCompareMode = !isAnyDifferentialView && noiseMode === "std";
   const isStdDifferentialMode = isAnyDifferentialView && diffNoiseEnabled;
   const showReturnDistance = isTemperatureChart && rangeMode === "tramo_2";
-  const yAxisWidth = isTemperatureChart ? Y_AXIS_WIDTH : Y_AXIS_WIDTH + 15;
+  const yAxisWidth = Y_AXIS_WIDTH + 15;
   const yLabel = isDifferentialView
     ? isTemperatureChart
       ? isStdDifferentialMode
@@ -69,7 +69,7 @@ const LimitsChart = ({
           : "Diferencial Manual Tension (uE)"
       : isStdCompareMode
         ? isTemperatureChart
-          ? "Desviacion estandar (sigma) Temperatura"
+          ? "Temperatura (C)"
           : "Tension (uE)"
       : isTemperatureChart
         ? "Temperatura (C)"
@@ -149,12 +149,12 @@ const LimitsChart = ({
               ? isStdDifferentialMode
                 ? "DE diferencial"
                 : "Diferencial"
-              : isStdCompareMode
-                ? "Sigma"
-                : `Iteracion ${activeReferenceIndex ?? "N/A"}`}
+              : isTemperatureChart
+                ? "Temperatura"
+                : "Tension"}
           </div>
           <div className="text-slate-600">
-            Distancia:{" "}
+            {showReturnDistance ? "Distancia Sistema" : "Distancia"}:{" "}
             {Number.isFinite(xValue) ? xValue.toFixed(2) : label} m
           </div>
           <div className="text-slate-800">
@@ -172,12 +172,6 @@ const LimitsChart = ({
               ? Number(selected.value).toFixed(3)
               : selected.value}
           </div>
-          {(isStdCompareMode || isStdDifferentialMode) &&
-            Number.isFinite(Number(point.meanValue)) && (
-              <div className="text-slate-600">
-                Promedio (mu): {Number(point.meanValue).toFixed(3)}
-              </div>
-            )}
           {isAnyDifferentialView && (
             <>
               <div className="text-slate-700">
@@ -199,7 +193,7 @@ const LimitsChart = ({
           )}
           {inverseDistance != null && (
             <div className="text-slate-600">
-              Distancia de retorno: {inverseDistance.toFixed(2)} m
+              Distancia: {inverseDistance.toFixed(2)} m
             </div>
           )}
           {thresholdPayload.length > 0 && (
