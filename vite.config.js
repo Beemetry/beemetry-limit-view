@@ -18,35 +18,46 @@ const DATA_ROOT = path.resolve(
 );
 const ROOT_DIR = path.resolve(__dirname);
 const CWD_DIR = path.resolve(process.cwd());
+const isClientAbortError = (error) =>
+  error?.code === "ECONNRESET" ||
+  error?.code === "ERR_STREAM_PREMATURE_CLOSE" ||
+  error?.message === "aborted";
 
 const buildDataMiddleware = () => {
   return async (req, res, next) => {
-    const urlString = req.originalUrl || req.url || "";
-    const bodyText = req.method === "POST" ? await readRequestBody(req) : "";
+    try {
+      const urlString = req.originalUrl || req.url || "";
+      const bodyText = req.method === "POST" ? await readRequestBody(req) : "";
 
-    const result = await handleFiberMonitorApiRequest({
-      method: req.method,
-      urlString,
-      host: "localhost",
-      dataRoot: DATA_ROOT,
-      bodyText,
-      logger: ({ channel, type, selectedCount, usedTodayFilter, todayKeys }) => {
-        console.log(
-          `[ch] ${urlString} channel=${channel} type=${type} selected=${selectedCount} todayFilter=${usedTodayFilter} todayKeys=${todayKeys.join(",")}`
-        );
-      },
-    });
+      const result = await handleFiberMonitorApiRequest({
+        method: req.method,
+        urlString,
+        host: "localhost",
+        dataRoot: DATA_ROOT,
+        bodyText,
+        logger: ({ channel, type, selectedCount, usedTodayFilter, todayKeys }) => {
+          console.log(
+            `[ch] ${urlString} channel=${channel} type=${type} selected=${selectedCount} todayFilter=${usedTodayFilter} todayKeys=${todayKeys.join(",")}`
+          );
+        },
+      });
 
-    if (!result.handled) {
-      return next();
+      if (!result.handled) {
+        return next();
+      }
+
+      res.statusCode = result.statusCode;
+      Object.entries(result.headers || {}).forEach(([key, value]) => {
+        res.setHeader(key, value);
+      });
+      res.end(result.body);
+      return undefined;
+    } catch (error) {
+      if (isClientAbortError(error)) {
+        return undefined;
+      }
+      return next(error);
     }
-
-    res.statusCode = result.statusCode;
-    Object.entries(result.headers || {}).forEach(([key, value]) => {
-      res.setHeader(key, value);
-    });
-    res.end(result.body);
-    return undefined;
   };
 };
 

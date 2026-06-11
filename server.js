@@ -17,33 +17,52 @@ const DATA_ROOT = path.resolve(
 );
 const PORT = process.env.FIBER_MONITOR_PORT || process.env.CH1_API_PORT || 4174;
 
+const isClientAbortError = (error) =>
+  error?.code === "ECONNRESET" ||
+  error?.code === "ERR_STREAM_PREMATURE_CLOSE" ||
+  error?.message === "aborted";
+
 const handleRequest = async (req, res) => {
-  const bodyText = req.method === "POST" ? await readRequestBody(req) : "";
+  try {
+    const bodyText = req.method === "POST" ? await readRequestBody(req) : "";
 
-  const result = await handleFiberMonitorApiRequest({
-    method: req.method,
-    urlString: req.url || "",
-    host: req.headers.host || "localhost",
-    dataRoot: DATA_ROOT,
-    bodyText,
-    logger: ({ channel, type, selectedCount, usedTodayFilter, todayKeys }) => {
-      console.log(
-        `[ch] channel=${channel} type=${type} selected=${selectedCount} todayFilter=${usedTodayFilter} todayKeys=${todayKeys.join(",")}`
-      );
-    },
-  });
+    const result = await handleFiberMonitorApiRequest({
+      method: req.method,
+      urlString: req.url || "",
+      host: req.headers.host || "localhost",
+      dataRoot: DATA_ROOT,
+      bodyText,
+      logger: ({ channel, type, selectedCount, usedTodayFilter, todayKeys }) => {
+        console.log(
+          `[ch] channel=${channel} type=${type} selected=${selectedCount} todayFilter=${usedTodayFilter} todayKeys=${todayKeys.join(",")}`
+        );
+      },
+    });
 
-  if (!result.handled) {
-    res.statusCode = 404;
-    res.end("Not found");
-    return;
+    if (!result.handled) {
+      res.statusCode = 404;
+      res.end("Not found");
+      return;
+    }
+
+    res.statusCode = result.statusCode;
+    Object.entries(result.headers || {}).forEach(([key, value]) => {
+      res.setHeader(key, value);
+    });
+    res.end(result.body);
+  } catch (error) {
+    if (isClientAbortError(error)) {
+      return;
+    }
+
+    console.error("[api] request error", error);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.end("Internal server error");
+    } else {
+      res.end();
+    }
   }
-
-  res.statusCode = result.statusCode;
-  Object.entries(result.headers || {}).forEach(([key, value]) => {
-    res.setHeader(key, value);
-  });
-  res.end(result.body);
 };
 
 const startServer = async () => {

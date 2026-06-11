@@ -11,6 +11,7 @@ import {
 
 export const API_PATHNAME = "/api/ch1-data";
 export const MONITOR_STATE_PATHNAME = "/api/monitor-state";
+export const MONITOR_ALERTS_PATHNAME = "/api/monitor-state/alerts";
 export const THRESHOLDS_PATHNAME = "/api/thresholds";
 export const CHANNEL_DIRS = {
   "1": "Fibra_Espesador_ch1",
@@ -91,6 +92,7 @@ const JSON_HEADERS = {
   "Content-Type": "application/json",
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
 };
 
 const monitorStore = {
@@ -1267,6 +1269,7 @@ export const handleFiberMonitorApiRequest = async ({
   if (
     url.pathname !== API_PATHNAME &&
     url.pathname !== MONITOR_STATE_PATHNAME &&
+    url.pathname !== MONITOR_ALERTS_PATHNAME &&
     url.pathname !== THRESHOLDS_PATHNAME
   ) {
     return { handled: false };
@@ -1360,6 +1363,52 @@ export const handleFiberMonitorApiRequest = async ({
       statusCode: 200,
       headers: JSON_HEADERS,
       body: JSON.stringify(getMonitorStatePayload()),
+    };
+  }
+
+  if (url.pathname === MONITOR_ALERTS_PATHNAME) {
+    if (method !== "DELETE") {
+      return {
+        handled: true,
+        statusCode: 405,
+        body: "Method not allowed",
+        headers: JSON_HEADERS,
+      };
+    }
+
+    let alertId = url.searchParams.get("id");
+    if (!alertId && bodyText) {
+      try {
+        const payload = JSON.parse(bodyText);
+        alertId = typeof payload?.id === "string" ? payload.id : null;
+      } catch {
+        alertId = null;
+      }
+    }
+
+    if (!alertId) {
+      return {
+        handled: true,
+        statusCode: 400,
+        body: JSON.stringify({ ok: false, error: "Missing alert id" }),
+        headers: JSON_HEADERS,
+      };
+    }
+
+    const beforeCount = monitorStore.alerts.length;
+    monitorStore.alerts = monitorStore.alerts.filter(
+      (alert) => alert.id !== alertId
+    );
+
+    return {
+      handled: true,
+      statusCode: 200,
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        ok: true,
+        removed: monitorStore.alerts.length !== beforeCount,
+        alerts: monitorStore.alerts.map(sanitizeAlertForClient),
+      }),
     };
   }
 

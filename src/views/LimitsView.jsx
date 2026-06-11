@@ -1752,14 +1752,40 @@ const LimitsView = () => {
     window.URL.revokeObjectURL(url);
   };
 
-  const handleDismissAlert = useCallback((alertId) => {
+  const handleDismissAlert = useCallback(async (alertId) => {
+    if (!alertId) {
+      return;
+    }
+
     setDismissedAlertIds((previous) => {
       if (previous.includes(alertId)) {
         return previous;
       }
       return [...previous, alertId];
     });
-  }, []);
+
+    try {
+      const response = await fetch(
+        `${getApiBase()}/api/monitor-state/alerts?id=${encodeURIComponent(
+          alertId
+        )}`,
+        { method: "DELETE" }
+      );
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = await response.json();
+      if (Array.isArray(payload?.alerts)) {
+        setAlerts(payload.alerts);
+      } else {
+        setAlerts((previous) => previous.filter((alert) => alert.id !== alertId));
+      }
+    } catch (error) {
+      console.error("Error eliminando alerta en backend", error);
+      setAlerts((previous) => previous.filter((alert) => alert.id !== alertId));
+    }
+  }, [getApiBase]);
 
   const handleClearAlertsFromScreen = useCallback(() => {
     setDismissedAlertIds((previous) => {
