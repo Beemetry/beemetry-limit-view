@@ -764,6 +764,7 @@ const LimitsView = () => {
   const isManualDifferentialView = viewMode === VIEW_MODES.manualDiff;
   const isDifferentialView =
     viewMode === VIEW_MODES.diff2 || isManualDifferentialView;
+  const canManageThresholds = viewMode === VIEW_MODES.compare;
   const isStdCompareMode =
     !isDifferentialView && noiseMode === NOISE_MODES.std;
 
@@ -947,7 +948,7 @@ const LimitsView = () => {
   );
 
   const visibleThresholdSeries = useMemo(() => {
-    if (isDifferentialView) {
+    if (!canManageThresholds) {
       return [];
     }
     const currentXMin = xDomain[0];
@@ -964,7 +965,7 @@ const LimitsView = () => {
           (point) => point.distance >= minVisible && point.distance <= maxVisible
         ),
       }));
-  }, [activeThresholdLevels, isDifferentialView, xDomain]);
+  }, [activeThresholdLevels, canManageThresholds, xDomain]);
 
   const soundThresholdCount = useMemo(
     () => activeThresholdLevels.filter((level) => level.soundEnabled).length,
@@ -1037,7 +1038,7 @@ const LimitsView = () => {
         maxY = Math.max(maxY, point.temperature);
       });
 
-      if (!isDifferentialView) {
+      if (canManageThresholds) {
         thresholdLevels.forEach((level) => {
           const levelChannelId = String(
             level.channelId || CHANNELS[DEFAULT_CHANNEL].id
@@ -1080,7 +1081,7 @@ const LimitsView = () => {
       hideUnselected,
       initialStats.yMax,
       initialStats.yMin,
-      isDifferentialView,
+      canManageThresholds,
       isStdCompareMode,
       rangeMode,
       thresholdLevels,
@@ -1853,7 +1854,7 @@ const LimitsView = () => {
         return null;
       }
 
-      const yAxisWidth = chartType === "tension" ? Y_AXIS_WIDTH + 10 : Y_AXIS_WIDTH;
+      const yAxisWidth = chartType === "tension" ? Y_AXIS_WIDTH + 15 : Y_AXIS_WIDTH;
       const gridLeft = CHART_MARGINS.left + yAxisWidth;
       const gridWidth =
         rect.width - CHART_MARGINS.left - CHART_MARGINS.right - yAxisWidth;
@@ -2372,7 +2373,7 @@ const LimitsView = () => {
                 <span className="font-semibold text-slate-700">{fileIds.length}</span>
                 ).
               </div>
-              <button
+              {/* <button
                 onClick={handleDownloadStdExcel}
                 disabled={processedData.length === 0}
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -2382,7 +2383,7 @@ const LimitsView = () => {
                 }`}
               >
                 Descargar Excel DE
-              </button>
+              </button> */}
             </div>
           )}
 
@@ -2413,7 +2414,7 @@ const LimitsView = () => {
           />
         </div>
 
-        {!isDifferentialView && (
+        {canManageThresholds && (
           <ControlPanel
             thresholdDirection={thresholdDirection}
             onThresholdDirectionChange={handleThresholdDirectionChange}

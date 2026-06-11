@@ -50,7 +50,7 @@ const LimitsChart = ({
   const isStdCompareMode = !isAnyDifferentialView && noiseMode === "std";
   const isStdDifferentialMode = isAnyDifferentialView && diffNoiseEnabled;
   const showReturnDistance = isTemperatureChart && rangeMode === "tramo_2";
-  const yAxisWidth = isTemperatureChart ? Y_AXIS_WIDTH : Y_AXIS_WIDTH + 10;
+  const yAxisWidth = isTemperatureChart ? Y_AXIS_WIDTH : Y_AXIS_WIDTH + 15;
   const yLabel = isDifferentialView
     ? isTemperatureChart
       ? isStdDifferentialMode
@@ -70,7 +70,7 @@ const LimitsChart = ({
       : isStdCompareMode
         ? isTemperatureChart
           ? "Desviacion estandar (sigma) Temperatura"
-          : "Desviacion estandar (sigma) Tension (uE)"
+          : "Tension (uE)"
       : isTemperatureChart
         ? "Temperatura (C)"
         : "Tension (uE)";
