@@ -91,6 +91,7 @@ const MIN_POINTER_DELTA_X = 1;
 const MIN_ZOOM_RATIO = 0.005;
 const MONITOR_POLL_MS = 2000;
 const THRESHOLD_CACHE_KEY = "beemetry-thresholds-cache";
+const DISMISSED_ALERTS_CACHE_KEY = "beemetry-dismissed-alerts-cache";
 const EMPTY_COMPARISON_INFO = {
   mode: VIEW_MODES.compare,
   latestFile: null,
@@ -667,6 +668,26 @@ const loadCachedThresholds = () => {
   }
 };
 
+const loadDismissedAlertIds = () => {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(DISMISSED_ALERTS_CACHE_KEY);
+    if (!rawValue) {
+      return [];
+    }
+
+    const parsed = JSON.parse(rawValue);
+    return Array.isArray(parsed)
+      ? parsed.filter((value) => typeof value === "string" && value.trim())
+      : [];
+  } catch {
+    return [];
+  }
+};
+
 const LimitsView = () => {
   const [chartType, setChartType] = useState(DEFAULT_CHART_TYPE);
   const [viewMode, setViewMode] = useState(VIEW_MODES.compare);
@@ -689,7 +710,7 @@ const LimitsView = () => {
   const [thresholdLevels, setThresholdLevels] = useState(loadCachedThresholds);
   const [thresholdsHydrated, setThresholdsHydrated] = useState(false);
   const [alerts, setAlerts] = useState([]);
-  const [dismissedAlertIds, setDismissedAlertIds] = useState([]);
+  const [dismissedAlertIds, setDismissedAlertIds] = useState(loadDismissedAlertIds);
   const [soundPanelOpen, setSoundPanelOpen] = useState(true);
   const [soundMuted, setSoundMuted] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
@@ -1422,6 +1443,21 @@ const LimitsView = () => {
   }, [syncPayload]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(
+        DISMISSED_ALERTS_CACHE_KEY,
+        JSON.stringify(dismissedAlertIds)
+      );
+    } catch (error) {
+      console.error("Error guardando cache de alertas descartadas", error);
+    }
+  }, [dismissedAlertIds]);
+
+  useEffect(() => {
     let isDisposed = false;
 
     const pollMonitor = async () => {
@@ -2107,7 +2143,7 @@ const LimitsView = () => {
                       </div>
                       <div className="text-slate-500">
                         Canal {alert.channel} | {getAlertTypeLabel(alert.type)} |{" "}
-                        {formatAlertTime(alert.createdAt)}
+                        {formatPeruDateTime(alert.createdAt)}
                       </div>
                       <div className="text-slate-700">
                         Pico detectado:{" "}
