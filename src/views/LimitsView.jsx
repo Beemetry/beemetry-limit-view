@@ -1535,6 +1535,17 @@ const LimitsView = () => {
     }
   };
 
+  const handleRangeModeChange = (event) => {
+    const value = event.target.value;
+    if (
+      value === RANGE_MODES.section1 ||
+      value === RANGE_MODES.section2 ||
+      value === RANGE_MODES.full
+    ) {
+      setRangeMode(value);
+    }
+  };
+
   const handleNoiseModeChange = (event) => {
     const value = event.target.value;
     if (value === NOISE_MODES.raw || value === NOISE_MODES.std) {
@@ -2035,9 +2046,18 @@ const LimitsView = () => {
             ))}
           </select>
         </div>
-        <span className="text-xs px-3 py-2 rounded-md bg-slate-100 text-slate-600">
-          {rangeMode === RANGE_MODES.section2 ? "Tramo 2" : "Tramo 1"}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-600">Tramo:</span>
+          <select
+            value={rangeMode}
+            onChange={handleRangeModeChange}
+            className="text-sm border border-slate-200 rounded-md px-3 py-2 bg-white shadow-sm"
+          >
+            <option value={RANGE_MODES.full}>Vista completa</option>
+            <option value={RANGE_MODES.section1}>Tramo 1</option>
+            <option value={RANGE_MODES.section2}>Tramo 2</option>
+          </select>
+        </div>
         {isDifferentialView && (
           <label className="flex items-center gap-2 text-xs text-slate-600 whitespace-nowrap">
             <input
