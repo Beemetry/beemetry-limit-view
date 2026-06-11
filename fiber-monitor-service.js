@@ -1,6 +1,7 @@
-import { watch, readFileSync } from "fs";
+import { watch, readFileSync, createReadStream } from "fs";
 import fs from "fs/promises";
 import path from "path";
+import { createInterface } from "readline";
 import { fileURLToPath } from "url";
 import {
   getModbusPublisherStatus,
@@ -299,43 +300,92 @@ const buildDifferentialRows = ({
     .sort((a, b) => a.distance - b.distance);
 };
 
-const buildStdSeriesFromPointSets = (pointSets) => {
-  const samplesByDistance = new Map();
+const collectThresholdDistanceKeys = (thresholds) => {
+  const keys = new Set();
+  thresholds.forEach((threshold) => {
+    if (threshold?.lookup instanceof Map) {
+      threshold.lookup.forEach((_, key) => keys.add(key));
+      return;
+    }
 
-  pointSets.forEach((points) => {
-    points.forEach((point) => {
-      if (
-        point.temperature == null ||
-        Number.isNaN(point.temperature) ||
-        !Number.isFinite(point.distance)
-      ) {
-        return;
-      }
+    if (!Array.isArray(threshold?.points)) {
+      return;
+    }
 
-      const key = normalizeDistanceKey(point.distance);
-      if (!samplesByDistance.has(key)) {
-        samplesByDistance.set(key, {
-          distance: point.distance,
-          values: [],
-        });
+    threshold.points.forEach((point) => {
+      const distance = Number(point?.distance);
+      if (Number.isFinite(distance)) {
+        keys.add(normalizeDistanceKey(distance));
       }
-      samplesByDistance.get(key).values.push(point.temperature);
     });
   });
+  return keys;
+};
 
-  return Array.from(samplesByDistance.values())
-    .map((entry) => {
-      const n = entry.values.length;
-      if (n === 0) {
+const accumulateStdStatsFromFile = async ({ filePath, targetKeys, statsByDistance }) => {
+  const stream = createReadStream(filePath, { encoding: "utf-8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+
+  try {
+    for await (const line of lines) {
+      const parts = line.trim().split(",");
+      if (parts.length < 2) {
+        continue;
+      }
+
+      const distance = Number.parseFloat(parts[0]);
+      const rawValue = Number.parseFloat(parts[1]);
+      if (!Number.isFinite(distance) || !Number.isFinite(rawValue)) {
+        continue;
+      }
+
+      const key = normalizeDistanceKey(distance);
+      if (!targetKeys.has(key)) {
+        continue;
+      }
+
+      const value = rawValue / MONITOR_VALUE_DIVISOR;
+      let stats = statsByDistance.get(key);
+      if (!stats) {
+        stats = { distance, count: 0, sum: 0, sumSquares: 0 };
+        statsByDistance.set(key, stats);
+      }
+
+      stats.count += 1;
+      stats.sum += value;
+      stats.sumSquares += value * value;
+    }
+  } catch (error) {
+    console.error("Error reading file for std alert evaluation", filePath, error);
+  }
+};
+
+const buildStdSeriesForThresholds = async ({ dataDir, selectedFiles, thresholds }) => {
+  const targetKeys = collectThresholdDistanceKeys(thresholds);
+  if (targetKeys.size === 0) {
+    return [];
+  }
+
+  const statsByDistance = new Map();
+  for (const selectedFile of selectedFiles) {
+    await accumulateStdStatsFromFile({
+      filePath: path.join(dataDir, selectedFile),
+      targetKeys,
+      statsByDistance,
+    });
+  }
+
+  return Array.from(statsByDistance.values())
+    .map((stats) => {
+      if (stats.count === 0) {
         return null;
       }
 
-      const mean = entry.values.reduce((sum, value) => sum + value, 0) / n;
-      const variance =
-        entry.values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / n;
+      const mean = stats.sum / stats.count;
+      const variance = Math.max(0, stats.sumSquares / stats.count - mean * mean);
 
       return {
-        distance: entry.distance,
+        distance: stats.distance,
         temperature: Number(Math.sqrt(variance).toFixed(6)),
       };
     })
@@ -863,29 +913,11 @@ const evaluateThresholdsForFile = async ({
     });
   }
 
-  const pointSets = [];
-  for (const selectedFile of selectedFiles) {
-    const rawPoints = await parseFilePoints(path.join(dataDir, selectedFile));
-    if (rawPoints.length === 0) {
-      continue;
-    }
-
-    pointSets.push(
-      rawPoints.map((point) => ({
-        ...point,
-        temperature:
-          point.temperature == null || Number.isNaN(Number(point.temperature))
-            ? point.temperature
-            : Number((Number(point.temperature) / MONITOR_VALUE_DIVISOR).toFixed(6)),
-      }))
-    );
-  }
-
-  if (pointSets.length === 0) {
-    return;
-  }
-
-  const filePoints = buildStdSeriesFromPointSets(pointSets);
+  const filePoints = await buildStdSeriesForThresholds({
+    dataDir,
+    selectedFiles,
+    thresholds: matchingThresholds,
+  });
   if (filePoints.length === 0) {
     return;
   }
